@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #050505;
+  --color-foreground: #ffffff;
+
+  --color-card: rgba(10, 10, 10, 0.4);
+  --color-card-foreground: #ffffff;
+
+  --color-popover: rgba(10, 10, 10, 0.6);
+  --color-popover-foreground: #ffffff;
+
+  --color-primary: #00ffcc;
+  --color-primary-foreground: #000000;
+
+  --color-secondary: rgba(255, 255, 255, 0.05);
+  --color-secondary-foreground: #ffffff;
+
+  --color-muted: rgba(255, 255, 255, 0.1);
+  --color-muted-foreground: rgba(255, 255, 255, 0.5);
+
+  --color-border: rgba(255, 255, 255, 0.1);
+  --color-input: rgba(255, 255, 255, 0.05);
+  --color-ring: #00ffcc;
+
+  --radius: 0px; /* Minimalist sharp edges */
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: 'Inter', system-ui, sans-serif;
+    margin: 0;
+    overflow-x: hidden;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #00ffcc;
+}
+
+@layer utilities {
+  .kinetic-card {
+    background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    transition: all 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  
+  .kinetic-card:hover {
+    border-color: rgba(0, 255, 204, 0.3);
+    box-shadow: 0 0 20px rgba(0, 255, 204, 0.1);
+    transform: translateY(-2px);
+  }
+
+  .text-glow {
+    text-shadow: 0 0 10px rgba(0, 255, 204, 0.5);
+  }
+}
