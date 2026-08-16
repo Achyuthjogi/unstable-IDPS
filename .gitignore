@@ -18,3 +18,8 @@ frontend/.npm/
 
 # Logs
 *.log
+
+# Rust
+backend/target/
+Cargo.lock
+**/*.rs.bk
