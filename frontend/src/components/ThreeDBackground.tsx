@@ -62,12 +62,14 @@ function KineticNetwork() {
     <group>
       <points ref={pointsRef}>
         <bufferGeometry>
+          {/* @ts-expect-error - args is not required in our usage */}
           <bufferAttribute
             attach="attributes-position"
             count={particleCount}
             array={positions}
             itemSize={3}
           />
+          {/* @ts-expect-error - args is not required in our usage */}
           <bufferAttribute
             attach="attributes-color"
             count={particleCount}
@@ -80,6 +82,7 @@ function KineticNetwork() {
       
       <lineSegments ref={linesRef}>
         <bufferGeometry>
+          {/* @ts-expect-error - args is not required in our usage */}
           <bufferAttribute
             attach="attributes-position"
             count={linePositions.length / 3}

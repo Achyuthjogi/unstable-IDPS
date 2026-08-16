@@ -1,6 +1,0 @@
-fastapi
-uvicorn
-scapy
-psutil
-pydantic
-websockets
