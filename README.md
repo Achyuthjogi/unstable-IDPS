@@ -2,7 +2,7 @@
 
 ![IDPS Dashboard Mockup](https://via.placeholder.com/1200x600.png?text=Nexus+IDPS+Dashboard)
 
-Nexus IDPS is a professional, production-quality Intrusion Detection and Prevention System built for real-time network security monitoring and automated mitigation. It uses a custom rule-based detection engine powered by Scapy and a highly responsive, modern SOC-style dashboard built with React and Tailwind CSS.
+Nexus IDPS is a professional, production-quality Intrusion Detection and Prevention System built for real-time network security monitoring and automated mitigation. It uses a custom rule-based detection engine powered by gopacket (Go) and a highly responsive, modern SOC-style dashboard built with React and Tailwind CSS.
 
 ## 🌟 Features
 
@@ -28,12 +28,12 @@ graph TD
         UI <--> WS_Client
     end
 
-    subgraph Backend [FastAPI / Python]
+    subgraph Backend [Go]
         API[REST API Routes]
         WS_Server[WebSocket Manager]
         State[(In-Memory State)]
         Detection[Rule-Based Engine]
-        Capture[Scapy Packet Sniffer]
+        Capture[gopacket Sniffer]
         
         Capture --> Detection
         Detection --> State
@@ -51,19 +51,15 @@ graph TD
 
 ```text
 IDPS/
-├── backend/                  # Python FastAPI Backend
-│   ├── app/
-│   │   ├── api/
-│   │   │   └── routes.py     # REST API endpoints
-│   │   ├── core/
-│   │   │   ├── capture.py    # Scapy packet capture
-│   │   │   ├── detection.py  # Threat detection rules
-│   │   │   ├── state.py      # In-memory tracking & state
-│   │   │   └── websocket.py  # Real-time WebSockets
-│   │   ├── config.py         # Configurable detection thresholds
-│   │   └── __init__.py
-│   ├── main.py               # FastAPI entry point
-│   └── requirements.txt      # Python dependencies
+├── backend/                  # Go Backend
+│   ├── api/                  # REST API and WebSockets
+│   ├── capture/              # gopacket capture logic
+│   ├── config/               # Environment configuration
+│   ├── detection/            # Threat detection rules
+│   ├── firewall/             # iptables management
+│   ├── state/                # In-memory thread-safe state
+│   ├── go.mod                # Go module file
+│   └── main.go               # Go entry point
 └── frontend/                 # React Vite Frontend
     ├── src/
     │   ├── components/       # Reusable UI components
@@ -83,24 +79,19 @@ IDPS/
 ## 🚀 Installation Guide
 
 ### Prerequisites
-* Python 3.9+
+* Go 1.20+
 * Node.js v20+ (with npm)
 * Linux OS (Ubuntu recommended) for raw socket capture
 
 ### 1. Setup Backend
 Open a terminal and navigate to the project root:
 ```bash
-# Create a virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r backend/requirements.txt
-
-# Run the backend
-# NOTE: Run with sudo if you want real packet capture, otherwise it will fall back to mock traffic
+# Build the Go binary
 cd backend
-sudo ../venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+go build -o idps-backend
+
+# Run the backend with sudo (required for raw packet capture)
+sudo ./idps-backend
 ```
 
 ### 2. Setup Frontend
@@ -125,15 +116,18 @@ npm run dev
 3. If connected successfully, the "Engine Online" indicator in the top right will turn green.
 
 ### How to Demo
-If you are running the backend **without sudo**, it will automatically detect the lack of raw socket permissions and fall back to **Mock Packet Generation**. This makes it incredibly easy to demonstrate the UI!
+The backend must be run **with sudo** to capture real packets. You can easily trigger alerts yourself to see the dashboard react in real time:
 
-1. **Watch the Traffic Spike**: The mock generator will periodically inject simulated bursts of traffic (e.g., 100 SYN packets in a row).
-2. **Observe the Alerts**: You will see the "Active Alerts" counter rise and new alerts populate the "Recent Detections" panel (e.g., SYN Flood, Port Scan, Unknown Device).
-3. **See Auto-Mitigation**: When an attack crosses a critical threshold, the source IP will automatically be added to the "Blocked IPs" list, and further packets from that IP will be dropped.
+1. **Ping Flood**: Generate a high volume of ICMP packets using the ping flood command:
+   ```bash
+   sudo ping -f <your-ip>
+   ```
+2. **Port Scan**: Run an aggressive Nmap scan to trigger the Port Scan rules:
+   ```bash
+   nmap -F <your-ip>
+   ```
 
-If running **with sudo**, you can trigger alerts yourself:
-* Generate a ping flood: `sudo ping -f <your-ip>`
-* Run a quick Nmap scan: `nmap -F <your-ip>`
+You will see the "Active Alerts" counter rise and new alerts populate the "Recent Detections" panel (e.g., ICMP Flood, Port Scan). When an attack crosses a critical threshold, the source IP will automatically be added to the "Blocked IPs" list.
 
 ---
 
