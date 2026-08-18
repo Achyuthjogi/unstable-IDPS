@@ -6,9 +6,9 @@ Nexus IDPS is a professional, production-quality Intrusion Detection and Prevent
 
 ## 🌟 Features
 
-* **Real-Time Traffic Analysis**: Monitors live network packets using Scapy.
-* **Rule-Based Threat Detection**: Detects DoS Attacks, SYN Floods, ICMP/UDP Floods, Port Scans, ARP Spoofing, and more.
-* **Automated Mitigation**: Simulates prevention by dynamically blocking and ignoring traffic from malicious IP addresses in memory.
+* **Real-Time Traffic Analysis**: Monitors live network packets using `gopacket`.
+* **Rule-Based Threat Detection**: Detects DoS Attacks, SYN Floods, ICMP/UDP Floods, DNS Amplification, Port Scans, ARP Spoofing, and more.
+* **Automated Mitigation**: Enforces prevention by dynamically adding and removing `iptables` rules at the host or inline gateway level to block malicious IPs.
 * **Modern SOC Dashboard**: Dark-themed, beautiful, real-time UI built with React, Recharts, and Framer Motion.
 * **WebSocket Integration**: Instantaneous updates pushed from backend to frontend without polling.
 * **No Database Required**: Fully in-memory state for lightning-fast performance, suitable for college projects or lightweight network monitoring.
@@ -34,8 +34,10 @@ graph TD
         State[(In-Memory State)]
         Detection[Rule-Based Engine]
         Capture[gopacket Sniffer]
+        WorkerPool[Bounded Worker Pool]
         
-        Capture --> Detection
+        Capture --> WorkerPool
+        WorkerPool --> Detection
         Detection --> State
         State --> WS_Server
         State --> API
@@ -167,17 +169,72 @@ Returns a list of currently blocked IP addresses.
 **Response:**
 ```json
 [
-  "192.168.1.100",
-  "10.0.0.5"
+  {
+    "ip": "192.168.1.100",
+    "rule_id": "NET-SYN-001",
+    "reason": "SYN Flood (160 pkts/s)",
+    "confidence": "High",
+    "created_at": 1690000000.0,
+    "expires_at": 1690000600.0
+  }
 ]
 ```
 
+### `POST /api/block/{ip}`
+Manually adds an IP address to the block list and updates `iptables`.
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "IP 192.168.1.100 blocked"
+}
+```
+
 ### `POST /api/unblock/{ip}`
-Manually removes an IP address from the block list.
+Manually removes an IP address from the block list and updates `iptables`.
 **Response:**
 ```json
 {
   "status": "success",
   "message": "IP 192.168.1.100 unblocked"
+}
+```
+
+### `DELETE /api/alerts/{id}`
+Dismisses a specific alert by its UUID.
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Alert dismissed"
+}
+```
+
+### `GET /api/settings`
+Returns the current active network interface and operational configurations.
+**Response:**
+```json
+{
+  "INTERFACE": "eth0",
+  "IDPS_DEPLOYMENT_MODE": "HOST",
+  "IDPS_SECURITY_MODE": "IPS",
+  "LAN_INTERFACE": "eth1",
+  "WAN_INTERFACE": "eth0"
+}
+```
+
+### `POST /api/settings`
+Updates operational configurations, triggering a hot-reload of the capture engine and firewall rules.
+**Request Body:**
+```json
+{
+  "IDPS_SECURITY_MODE": "IDS"
+}
+```
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Configuration applied successfully."
 }
 ```
