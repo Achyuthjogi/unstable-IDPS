@@ -1,15 +1,22 @@
 # Environments
-venv/
-env/
 .env
-.venv/
-__pycache__/
-*.pyc
 
 # Node
 frontend/node_modules/
 frontend/dist/
+frontend/dist-ssr/
 frontend/.npm/
+frontend/*.local
+
+# Go (Backend)
+backend/idps-backend
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
 
 # IDEs and OS
 .vscode/
@@ -18,8 +25,3 @@ frontend/.npm/
 
 # Logs
 *.log
-
-# Rust
-backend/target/
-Cargo.lock
-**/*.rs.bk

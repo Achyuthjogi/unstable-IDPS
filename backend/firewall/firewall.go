@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 
@@ -18,7 +19,10 @@ func NewFirewallManager() *FirewallManager {
 	}
 }
 
-func (fm *FirewallManager) isSafeToBlock(ip string) bool {
+func (fm *FirewallManager) isSafeToBlock(ip string, cfg *config.Config) bool {
+	if cfg != nil && cfg.GatewayIP != "" && ip == cfg.GatewayIP {
+		return false
+	}
 	for _, trusted := range fm.trustedIPs {
 		if ip == trusted {
 			return false
@@ -27,6 +31,24 @@ func (fm *FirewallManager) isSafeToBlock(ip string) bool {
 	if strings.HasPrefix(ip, "224.") || strings.HasPrefix(ip, "239.") || strings.HasSuffix(ip, ".255") {
 		return false
 	}
+	
+	// Check local interfaces
+	addrs, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, addr := range addrs {
+			var localIP net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				localIP = v.IP
+			case *net.IPAddr:
+				localIP = v.IP
+			}
+			if localIP != nil && localIP.String() == ip {
+				return false
+			}
+		}
+	}
+
 	return true
 }
 
@@ -61,7 +83,7 @@ func (fm *FirewallManager) TeardownGateway(cfg *config.Config) {
 }
 
 func (fm *FirewallManager) BlockIP(ip string, cfg *config.Config) bool {
-	if !fm.isSafeToBlock(ip) {
+	if !fm.isSafeToBlock(ip, cfg) {
 		fmt.Printf("FirewallManager: Refused to block trusted/unsafe IP %s\n", ip)
 		return false
 	}

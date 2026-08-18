@@ -3,6 +3,7 @@ package capture
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"idps-backend/config"
@@ -38,6 +39,24 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	
+	packetChannel := make(chan detection.PacketInfo, 2000)
+	var wg sync.WaitGroup
+
+	workerCount := cfg.WorkerCount
+	if workerCount <= 0 {
+		workerCount = 4
+	}
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for pkt := range packetChannel {
+				detection.AnalyzePacket(st, cfg, fm, pkt)
+			}
+		}()
+	}
+
 	go func() {
 		for packet := range packetSource.Packets() {
 			ts := getTimestamp()
@@ -125,11 +144,23 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 				}
 			}
 
-			go detection.AnalyzePacket(st, cfg, fm, pktInfo)
+			select {
+			case packetChannel <- pktInfo:
+			default:
+				st.Mu.Lock()
+				st.DroppedPacketCount++
+				st.Mu.Unlock()
+			}
 		}
 		
 		fmt.Printf("Capture stopped on interface: %s\n", ifaceName)
+		close(packetChannel)
 	}()
+	
+	stop = func() {
+		handle.Close()
+		wg.Wait()
+	}
 	
 	return stop
 }
@@ -185,14 +216,12 @@ func appendTrafficLog(st *state.AppState, ts float64, srcIP, domain, proto strin
 		return
 	}
 
-	go func() {
-		st.Mu.Lock()
-		defer st.Mu.Unlock()
-		st.AddTrafficLog(state.TrafficLog{
-			Timestamp: ts,
-			SrcIP:     srcIP,
-			Domain:    domain,
-			Proto:     proto,
-		})
-	}()
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	st.AddTrafficLog(state.TrafficLog{
+		Timestamp: ts,
+		SrcIP:     srcIP,
+		Domain:    domain,
+		Proto:     proto,
+	})
 }

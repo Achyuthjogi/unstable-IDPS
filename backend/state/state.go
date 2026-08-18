@@ -54,20 +54,22 @@ type ThreatTimeline struct {
 type AppState struct {
 	Mu sync.RWMutex
 
-	BlockedIPs  map[string]IPBlock
-	Devices     map[string]*Device
-	Alerts      []Alert
-	PacketCount int
+	BlockedIPs         map[string]IPBlock
+	Devices            map[string]*Device
+	Alerts             []Alert
+	PacketCount        int
+	DroppedPacketCount int
 
 	ThreatTimeline []ThreatTimeline
 	TrafficLog     []TrafficLog
 
 	// Windowed tracking (timestamps)
-	IPPacketTimestamps map[string][]float64
-	IPICMPTimestamps   map[string][]float64
-	IPUDPTimestamps    map[string][]float64
-	IPSYNTimestamps    map[string][]float64
-	IPSSHTimestamps    map[string][]float64
+	IPPacketTimestamps   map[string][]float64
+	IPICMPTimestamps     map[string][]float64
+	IPUDPTimestamps      map[string][]float64
+	IPDNSReplyTimestamps map[string][]float64
+	IPSYNTimestamps      map[string][]float64
+	IPSSHTimestamps      map[string][]float64
 
 	// Port scan tracking: src_ip -> { dst_port -> timestamp }
 	IPPortsAccessed map[string]map[uint16]float64
@@ -89,12 +91,13 @@ func NewAppState() *AppState {
 		Alerts:             make([]Alert, 0, 1000),
 		ThreatTimeline:     make([]ThreatTimeline, 0, 500),
 		TrafficLog:         make([]TrafficLog, 0, 200),
-		IPPacketTimestamps: make(map[string][]float64),
-		IPICMPTimestamps:   make(map[string][]float64),
-		IPUDPTimestamps:    make(map[string][]float64),
-		IPSYNTimestamps:    make(map[string][]float64),
-		IPSSHTimestamps:    make(map[string][]float64),
-		IPPortsAccessed:    make(map[string]map[uint16]float64),
+		IPPacketTimestamps:   make(map[string][]float64),
+		IPICMPTimestamps:     make(map[string][]float64),
+		IPUDPTimestamps:      make(map[string][]float64),
+		IPDNSReplyTimestamps: make(map[string][]float64),
+		IPSYNTimestamps:      make(map[string][]float64),
+		IPSSHTimestamps:      make(map[string][]float64),
+		IPPortsAccessed:      make(map[string]map[uint16]float64),
 		IPMACMapping:       make(map[string]map[string]float64),
 		PortCounts:         make(map[uint16]int),
 		ProtocolCounts:     make(map[string]int),

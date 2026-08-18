@@ -34,6 +34,35 @@ func main() {
 	// Start packet capture
 	stopCapture := capture.StartCapture(appState, cfg, fwManager)
 
+	// Start auto-unblock goroutine
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				appState.Mu.Lock()
+				now := float64(time.Now().UnixNano()) / 1e9
+				for ip, block := range appState.BlockedIPs {
+					if block.ExpiresAt > 0 && block.ExpiresAt <= now {
+						if fwManager.UnblockIP(ip, cfg) {
+							delete(appState.BlockedIPs, ip)
+							appState.AddThreatTimeline(state.ThreatTimeline{
+								Timestamp: now,
+								Event:     fmt.Sprintf("Auto-unblocked IP %s (Rule: %s expired)", ip, block.RuleID),
+								Severity:  "Info",
+							})
+						}
+					}
+				}
+				appState.Mu.Unlock()
+			}
+		}
+	}()
+
 	// Setup API
 	apiState := &api.ApiState{
 		St:       appState,
@@ -87,10 +116,14 @@ func main() {
 
 	// Teardown Gateway before exiting
 	fwManager.TeardownGateway(cfg)
+	cancel() // stop auto-unblock goroutine
+	if stopCapture != nil {
+		stopCapture() // wait for capture to stop completely
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatal("Server Shutdown:", err)
 	}
 	fmt.Println("IDPS Backend stopped gracefully.")

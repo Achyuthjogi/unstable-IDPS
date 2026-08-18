@@ -213,12 +213,12 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 
 		// DNS Amplification
 		if packet.SrcPort == 53 && len(packet.Payload) > 500 {
-			udpTs, exists := st.IPUDPTimestamps[srcIP]
+			udpTs, exists := st.IPDNSReplyTimestamps[srcIP]
 			if !exists {
 				udpTs = make([]float64, 0, 5000)
 			}
-			dnsRate := addTimestamp(&udpTs, currentTime) // Reusing UDP timestamps for tracking rate of DNS replies
-			st.IPUDPTimestamps[srcIP] = udpTs
+			dnsRate := addTimestamp(&udpTs, currentTime)
+			st.IPDNSReplyTimestamps[srcIP] = udpTs
 
 			if dnsRate > 20 {
 				triggerAlert(st, cfg, fm, currentTime, "NET-DNS-001", "DNS Amplification", "High", "High", srcIP, dstIP, fmt.Sprintf("DNS Amplification (%d pkts/3s)", dnsRate), float64(dnsRate))

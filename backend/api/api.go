@@ -163,6 +163,18 @@ func getBlocked(w http.ResponseWriter, r *http.Request, api *ApiState) {
 
 func blockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string) {
 	if api.Firewall.BlockIP(ip, api.Config) {
+		now := float64(time.Now().UnixNano()) / 1e9
+		expiresAt := now + float64(api.Config.BlockTTLSeconds)
+		api.St.Mu.Lock()
+		api.St.BlockedIPs[ip] = state.IPBlock{
+			IP:         ip,
+			RuleID:     "MANUAL",
+			Reason:     "Manually blocked via API",
+			Confidence: "N/A",
+			CreatedAt:  now,
+			ExpiresAt:  expiresAt,
+		}
+		api.St.Mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": fmt.Sprintf("IP %s blocked", ip)})
 	} else {
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": fmt.Sprintf("Failed to block %s", ip)})

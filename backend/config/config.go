@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"strconv"
 
 	"github.com/joho/godotenv"
@@ -20,6 +21,8 @@ type Config struct {
 	SYNFloodThreshold       int
 	SSHBruteForceThreshold  int
 	BlockTTLSeconds         int
+	GatewayIP               string
+	WorkerCount             int
 }
 
 func Load() *Config {
@@ -38,6 +41,8 @@ func Load() *Config {
 		SYNFloodThreshold:       getEnvInt("SYN_FLOOD_THRESHOLD", 150),
 		SSHBruteForceThreshold:  getEnvInt("SSH_BRUTE_FORCE_THRESHOLD", 10),
 		BlockTTLSeconds:         getEnvInt("BLOCK_TTL_SECONDS", 600),
+		GatewayIP:               getEnv("GATEWAY_IP", ""),
+		WorkerCount:             getEnvInt("WORKER_COUNT", runtime.NumCPU()),
 	}
 }
 

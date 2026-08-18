@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 export const useWebSocket = (url: string) => {
   const [data, setData] = useState<any>(null);
   const [status, setStatus] = useState<string>('connecting');
+  const isCleaningUp = useRef(false);
 
   useEffect(() => {
+    isCleaningUp.current = false;
     let ws: WebSocket;
     let reconnectTimer: ReturnType<typeof setTimeout>;
 
@@ -26,6 +28,7 @@ export const useWebSocket = (url: string) => {
 
       ws.onclose = () => {
         setStatus('disconnected');
+        if (isCleaningUp.current) return;
         reconnectTimer = setTimeout(connect, 3000);
       };
 
@@ -37,6 +40,7 @@ export const useWebSocket = (url: string) => {
     connect();
 
     return () => {
+      isCleaningUp.current = true;
       if (ws) ws.close();
       if (reconnectTimer) clearTimeout(reconnectTimer);
     };
