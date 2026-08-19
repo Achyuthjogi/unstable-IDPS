@@ -18,7 +18,7 @@ backend/idps-backend
 *.dylib
 *.test
 *.out
-
+*_test.go
 # IDEs and OS
 .vscode/
 .idea/

@@ -28,6 +28,7 @@ type Config struct {
 	BlockTTLSeconds         int
 	GatewayIP               string
 	WorkerCount             int
+	LegitimateDHCPServerIP  string
 
 	// Snort Engine Config
 	RulesPath     string
@@ -82,6 +83,7 @@ func Load() *Config {
 		BlockTTLSeconds:         getEnvInt("BLOCK_TTL_SECONDS", 600),
 		GatewayIP:               getEnv("GATEWAY_IP", ""),
 		WorkerCount:             getEnvInt("WORKER_COUNT", runtime.NumCPU()),
+		LegitimateDHCPServerIP:  getEnv("LEGITIMATE_DHCP_SERVER_IP", ""),
 		RulesPath:               getEnv("RULES_PATH", "./rules"),
 		AlertLogPath:            getEnv("ALERT_LOG_PATH", "alerts.json"),
 		MaxFlows:                getEnvInt("MAX_FLOWS", 100000),

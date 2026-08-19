@@ -75,8 +75,15 @@ type AppState struct {
 	// Port scan tracking: src_ip -> { dst_port -> timestamp }
 	IPPortsAccessed map[string]map[uint16]float64
 
+	// ICMP Sweep tracking: src_ip -> { dst_ip -> timestamp }
+	IPICMPSweep map[string]map[string]float64
+
 	// ARP spoofing tracking: src_ip -> { mac -> timestamp }
 	IPMACMapping map[string]map[string]float64
+
+	// MAC Flood / DHCP Starvation tracking
+	GlobalMACsSeen map[string]float64
+	DHCPStarvation map[string]float64 // mac -> timestamp for DHCP discovers
 
 	PortCounts      map[uint16]int
 	ProtocolCounts  map[string]int
@@ -100,7 +107,10 @@ func NewAppState() *AppState {
 		IPSSHTimestamps:      make(map[string][]float64),
 		IPARPTimestamps:      make(map[string][]float64),
 		IPPortsAccessed:      make(map[string]map[uint16]float64),
+		IPICMPSweep:          make(map[string]map[string]float64),
 		IPMACMapping:       make(map[string]map[string]float64),
+		GlobalMACsSeen:     make(map[string]float64),
+		DHCPStarvation:     make(map[string]float64),
 		PortCounts:         make(map[uint16]int),
 		ProtocolCounts:     make(map[string]int),
 		LastAlertTimes:     make(map[string]float64),

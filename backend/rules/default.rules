@@ -10,3 +10,11 @@ alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"NOP Sled Detected (Buffer Ove
 
 # Protocol Anomalies
 alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"Invalid HTTP Method"; flow:established,to_server; content:"INVALIDMETHOD"; classtype:protocol-command-decode; sid:1000201; rev:1; priority:3;)
+
+# Authentication Brute-Force Attempts (Basic signature for repeated failed logins, usually handled by heuristics for rate tracking, but here's a signature for failed login replies)
+alert tcp $HOME_NET 21 -> $EXTERNAL_NET any (msg:"FTP Authentication Failure"; flow:established,to_client; content:"530 Login incorrect"; classtype:unsuccessful-user; sid:1000301; rev:1; priority:3;)
+alert tcp $HOME_NET 23 -> $EXTERNAL_NET any (msg:"Telnet Authentication Failure"; flow:established,to_client; content:"Login incorrect"; nocase; classtype:unsuccessful-user; sid:1000302; rev:1; priority:3;)
+
+# SMB/Windows Service Scanning (Probing 139/445)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 139 (msg:"SMB/NetBIOS Scan Detected"; flow:stateless; flags:S; classtype:attempted-recon; sid:1000401; rev:1; priority:3;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 445 (msg:"SMB/Windows Service Scan Detected"; flow:stateless; flags:S; classtype:attempted-recon; sid:1000402; rev:1; priority:3;)

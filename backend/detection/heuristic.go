@@ -12,6 +12,10 @@ import (
 	"github.com/google/uuid"
 )
 
+func isInternalIP(ip string) bool {
+	return strings.HasPrefix(ip, "192.168.") || strings.HasPrefix(ip, "10.") || (strings.HasPrefix(ip, "172.") && len(ip) > 4 && ip[4] >= '1' && ip[4] <= '3')
+}
+
 func getTimestamp() float64 {
 	return float64(time.Now().UnixNano()) / 1e9
 }
@@ -63,6 +67,20 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 				device.IP = srcIP
 			}
 		}
+		
+		st.GlobalMACsSeen[packet.SrcMAC] = currentTime
+		recentMACs := 0
+		for mac, t := range st.GlobalMACsSeen {
+			if currentTime-t > 1.0 {
+				delete(st.GlobalMACsSeen, mac)
+			} else {
+				recentMACs++
+			}
+		}
+		if recentMACs > 100 { // 100 unique MACs in 1 second
+			triggerAlert(st, cfg, fm, currentTime, "NET-MAC-001", "MAC Flooding", "Critical", "High", srcIP, dstIP, fmt.Sprintf("MAC Flood / CAM Exhaustion (%d MACs/sec)", recentMACs), float64(recentMACs))
+		}
+		
 		st.Mu.Unlock()
 	}
 
@@ -159,6 +177,33 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		}
 	}
 
+	// Abnormal Lateral Movement Check
+	if isInternalIP(srcIP) && isInternalIP(dstIP) {
+		if packet.DstPort == 22 || packet.DstPort == 445 || packet.DstPort == 3389 {
+			portKey := srcIP + "_LATERAL"
+			ports, exists := st.IPPortsAccessed[portKey]
+			if !exists {
+				ports = make(map[uint16]float64) // using uint16 to store hash of IP for simplicity, or just use another map.
+				// Wait, IPPortsAccessed is map[uint16]float64. We can use the last octet of the IP as a uint16 just to count unique hosts.
+			}
+			parts := strings.Split(dstIP, ".")
+			if len(parts) == 4 {
+				lastOctet := 0
+				fmt.Sscanf(parts[3], "%d", &lastOctet)
+				ports[uint16(lastOctet)] = currentTime
+				for p, t := range ports {
+					if currentTime-t > 60.0 {
+						delete(ports, p)
+					}
+				}
+				st.IPPortsAccessed[portKey] = ports
+				if len(ports) > 3 {
+					triggerAlert(st, cfg, fm, currentTime, "NET-LAT-001", "Abnormal Lateral Movement", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Lateral Movement Scan (%d internal hosts/min)", len(ports)), float64(len(ports)))
+				}
+			}
+		}
+	}
+
 	uniquePortsRate := 0
 	if packet.Protocol == "TCP" {
 		if packet.IsTCPSYN && !packet.IsTCPACK && !packet.IsTCPRST {
@@ -234,6 +279,31 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 			triggerAlert(st, cfg, fm, currentTime, "NET-UDP-001", "UDP Flood", "Medium", "High", srcIP, dstIP, fmt.Sprintf("UDP Flood (%d pkts/s)", udpRate), float64(udpRate))
 		}
 
+		// DHCP Anomalies
+		if packet.DstPort == 67 || packet.DstPort == 68 || packet.SrcPort == 67 || packet.SrcPort == 68 {
+			if len(packet.Payload) > 240 {
+				opcode := packet.Payload[0]
+				if opcode == 1 { // BootRequest / DHCP Discover
+					st.DHCPStarvation[packet.SrcMAC] = currentTime
+					recentDHCPMACs := 0
+					for mac, t := range st.DHCPStarvation {
+						if currentTime-t > 10.0 {
+							delete(st.DHCPStarvation, mac)
+						} else {
+							recentDHCPMACs++
+						}
+					}
+					if recentDHCPMACs > 50 { // >50 unique MACs doing DHCP Discover in 10s
+						triggerAlert(st, cfg, fm, currentTime, "NET-DHCP-001", "DHCP Starvation", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DHCP Starvation (%d unique MACs/10s)", recentDHCPMACs), float64(recentDHCPMACs))
+					}
+				} else if opcode == 2 { // BootReply / DHCP Offer
+					if cfg.LegitimateDHCPServerIP != "" && srcIP != cfg.LegitimateDHCPServerIP {
+						triggerAlert(st, cfg, fm, currentTime, "NET-DHCP-002", "Rogue DHCP Server", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Rogue DHCP Offer from %s", srcIP), 1.0)
+					}
+				}
+			}
+		}
+
 		// DNS Amplification
 		if packet.SrcPort == 53 && len(packet.Payload) > 500 {
 			udpTs, exists := st.IPDNSReplyTimestamps[srcIP]
@@ -245,6 +315,41 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 
 			if dnsRate > 20 {
 				triggerAlert(st, cfg, fm, currentTime, "NET-DNS-001", "DNS Amplification", "High", "Medium", srcIP, dstIP, fmt.Sprintf("Heuristic DNS Amplification (%d pkts/s)", dnsRate), float64(dnsRate))
+			}
+		}
+		
+		if packet.SrcPort == 53 || packet.DstPort == 53 {
+			// DNS Tunneling and Spoofing
+			// Decoding DNS payload manually for heuristics
+			if len(packet.Payload) > 12 {
+				isReply := (packet.Payload[2] & 0x80) != 0 // QR bit
+				if !isReply {
+					// Query - check for long names
+					qdcount := uint16(packet.Payload[4])<<8 | uint16(packet.Payload[5])
+					if qdcount > 0 {
+						offset := 12
+						for offset < len(packet.Payload) && qdcount > 0 {
+							length := int(packet.Payload[offset])
+							if length == 0 {
+								break
+							}
+							if offset+length < len(packet.Payload) && length > 63 {
+								triggerAlert(st, cfg, fm, currentTime, "NET-DNS-002", "DNS Tunneling", "High", "High", srcIP, dstIP, "Extremely long DNS label detected", 1.0)
+								break
+							}
+							offset += length + 1
+						}
+					}
+				} else {
+					// Reply
+					if isInternalIP(srcIP) && srcIP != cfg.GatewayIP && cfg.GatewayIP != "" {
+						triggerAlert(st, cfg, fm, currentTime, "NET-DNS-003", "DNS Spoofing", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DNS Reply from unauthorized internal host %s", srcIP), 1.0)
+					}
+					// Simple check for large TXT replies could be added here by parsing the answers, but keeping it simple.
+					if len(packet.Payload) > 1000 {
+						triggerAlert(st, cfg, fm, currentTime, "NET-DNS-002", "DNS Tunneling", "High", "Medium", srcIP, dstIP, "Unusually large DNS reply payload", 1.0)
+					}
+				}
 			}
 		}
 	}
@@ -265,6 +370,22 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		// Ping of Death
 		if len(packet.Payload) > 1000 {
 			triggerAlert(st, cfg, fm, currentTime, "NET-POD-001", "Ping of Death", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Oversized ICMP (%d bytes)", len(packet.Payload)), 1.0)
+		}
+
+		// ICMP Sweep
+		sweepMap, exists := st.IPICMPSweep[srcIP]
+		if !exists {
+			sweepMap = make(map[string]float64)
+		}
+		sweepMap[dstIP] = currentTime
+		for dip, t := range sweepMap {
+			if currentTime-t > 10.0 {
+				delete(sweepMap, dip)
+			}
+		}
+		st.IPICMPSweep[srcIP] = sweepMap
+		if len(sweepMap) > 10 { // Ping sweep to >10 hosts in 10s
+			triggerAlert(st, cfg, fm, currentTime, "NET-SWEEP-001", "ICMP Sweep", "Medium", "High", srcIP, dstIP, fmt.Sprintf("ICMP Sweep (%d hosts/10s)", len(sweepMap)), float64(len(sweepMap)))
 		}
 	}
 
