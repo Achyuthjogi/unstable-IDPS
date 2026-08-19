@@ -162,6 +162,12 @@ func getBlocked(w http.ResponseWriter, r *http.Request, api *ApiState) {
 }
 
 func blockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string) {
+	if net.ParseIP(ip) == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "Invalid IP address"})
+		return
+	}
+
 	if api.Firewall.BlockIP(ip, api.Config) {
 		now := float64(time.Now().UnixNano()) / 1e9
 		expiresAt := now + float64(api.Config.BlockTTLSeconds)
@@ -177,17 +183,25 @@ func blockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string) {
 		api.St.Mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": fmt.Sprintf("IP %s blocked", ip)})
 	} else {
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": fmt.Sprintf("Failed to block %s", ip)})
 	}
 }
 
 func unblockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string) {
+	if net.ParseIP(ip) == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "Invalid IP address"})
+		return
+	}
+
 	if api.Firewall.UnblockIP(ip, api.Config) {
 		api.St.Mu.Lock()
 		delete(api.St.BlockedIPs, ip)
 		api.St.Mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": fmt.Sprintf("IP %s unblocked", ip)})
 	} else {
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": fmt.Sprintf("Failed to unblock %s", ip)})
 	}
 }
@@ -210,9 +224,17 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	}
 
 	if val, ok := body["IDPS_DEPLOYMENT_MODE"]; ok {
+		if val != "HOST" && val != "NETWORK" && val != "GATEWAY" {
+			http.Error(w, "Invalid deployment mode", http.StatusBadRequest)
+			return
+		}
 		api.Config.IDPSDeploymentMode = val
 	}
 	if val, ok := body["IDPS_SECURITY_MODE"]; ok {
+		if val != "IDS" && val != "IPS" {
+			http.Error(w, "Invalid security mode", http.StatusBadRequest)
+			return
+		}
 		api.Config.IDPSSecurityMode = val
 	}
 	if val, ok := body["WAN_INTERFACE"]; ok {
@@ -223,6 +245,7 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	}
 	if val, ok := body["INTERFACE"]; ok {
 		api.Config.Interface = val
+		api.Config.CaptureInterface = val
 	}
 
 	// Trigger hot-reload in main

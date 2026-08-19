@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -20,45 +21,71 @@ func getTimestamp() float64 {
 	return float64(time.Now().UnixNano()) / 1e9
 }
 
-func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager) (stop func()) {
-	ifaceName := cfg.Interface
+func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager) (func(), error) {
+	ifaceName := cfg.CaptureInterface
 	fmt.Printf("Starting capture on interface: %s\n", ifaceName)
 
-	handle, err := pcap.OpenLive(ifaceName, 65535, true, pcap.BlockForever)
+	// Use a 1-second timeout instead of BlockForever to allow clean shutdown checks
+	handle, err := pcap.OpenLive(ifaceName, 65535, true, 1*time.Second)
 	if err != nil {
-		fmt.Printf("Failed to open capture device %s: %v\n", ifaceName, err)
-		return func() {}
-	}
-	
-	stop = func() {
-		handle.Close()
+		return nil, fmt.Errorf("failed to open capture device %s: %w", ifaceName, err)
 	}
 
 	linkType := handle.LinkType()
 	fmt.Printf("Datalink type: %v\n", linkType)
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	
-	packetChannel := make(chan detection.PacketInfo, 2000)
-	var wg sync.WaitGroup
 
 	workerCount := cfg.WorkerCount
 	if workerCount <= 0 {
 		workerCount = 4
 	}
 
+	channels := make([]chan detection.PacketInfo, workerCount)
+	var wg sync.WaitGroup
+
 	for i := 0; i < workerCount; i++ {
+		channels[i] = make(chan detection.PacketInfo, 2000)
 		wg.Add(1)
-		go func() {
+		go func(ch chan detection.PacketInfo) {
 			defer wg.Done()
-			for pkt := range packetChannel {
+			for pkt := range ch {
 				detection.AnalyzePacket(st, cfg, fm, pkt)
 			}
-		}()
+		}(channels[i])
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	go func() {
-		for packet := range packetSource.Packets() {
+		defer func() {
+			fmt.Printf("Capture stopped on interface: %s\n", ifaceName)
+			for i := 0; i < workerCount; i++ {
+				close(channels[i])
+			}
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			packet, err := packetSource.NextPacket()
+			if err != nil {
+				// pcap.NextErrorTimeoutExpired is expected every 1s if idle
+				if strings.Contains(err.Error(), "Timeout Expired") || err.Error() == "Timeout Expired" {
+					continue
+				}
+				// If handle is closed, err will be EOF or a closed error
+				return
+			}
+
+			if packet == nil {
+				continue
+			}
+
 			ts := getTimestamp()
 
 			pktInfo := detection.PacketInfo{
@@ -144,25 +171,34 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 				}
 			}
 
-			select {
-			case packetChannel <- pktInfo:
-			default:
-				st.Mu.Lock()
-				st.DroppedPacketCount++
-				st.Mu.Unlock()
+			if pktInfo.SrcIP != "" {
+				var hash uint32
+				for i := 0; i < len(pktInfo.SrcIP); i++ {
+					hash = hash*31 + uint32(pktInfo.SrcIP[i])
+				}
+				idx := hash % uint32(workerCount)
+				
+				select {
+				case channels[idx] <- pktInfo:
+				default:
+					st.Mu.Lock()
+					st.DroppedPacketCount++
+					st.Mu.Unlock()
+				}
 			}
 		}
-		
-		fmt.Printf("Capture stopped on interface: %s\n", ifaceName)
-		close(packetChannel)
 	}()
-	
-	stop = func() {
-		handle.Close()
-		wg.Wait()
+
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			cancel() // Signal the capture loop to stop
+			handle.Close()
+			wg.Wait()
+		})
 	}
-	
-	return stop
+
+	return stop, nil
 }
 
 func extractDNSLog(st *state.AppState, ts float64, srcIP string, payload []byte) {

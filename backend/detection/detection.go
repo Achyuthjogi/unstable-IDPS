@@ -2,6 +2,7 @@ package detection
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"idps-backend/config"
@@ -133,7 +134,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 
 		macCount := len(macs)
 		if macCount > 1 {
-			triggerAlert(st, cfg, fm, currentTime, "NET-ARP-001", "Duplicate IP / ARP Spoofing", "High", "Medium", srcIP, dstIP, fmt.Sprintf("ARP Spoofing (%d MACs)", macCount), float64(macCount))
+			triggerAlert(st, cfg, fm, currentTime, "NET-ARP-001", "Duplicate IP / ARP Spoofing", "Medium", "Low", srcIP, dstIP, fmt.Sprintf("Heuristic ARP Spoofing (%d MACs)", macCount), float64(macCount))
 		}
 	}
 
@@ -141,7 +142,8 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 	if packet.Protocol == "TCP" {
 		if packet.IsTCPSYN && !packet.IsTCPACK && !packet.IsTCPRST {
 			if packet.DstPort != 0 {
-				ports, exists := st.IPPortsAccessed[srcIP]
+				portKey := srcIP + "-" + dstIP
+				ports, exists := st.IPPortsAccessed[portKey]
 				if !exists {
 					ports = make(map[uint16]float64)
 				}
@@ -151,7 +153,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 						delete(ports, p)
 					}
 				}
-				st.IPPortsAccessed[srcIP] = ports
+				st.IPPortsAccessed[portKey] = ports
 				uniquePortsRate = len(ports)
 			}
 
@@ -193,22 +195,22 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 
 	// UDP Flood
 	if packet.Protocol == "UDP" {
-		wellKnownPort := func(p uint16) bool {
-			return p == 53 || p == 67 || p == 68 || p == 443 || p == 80 || p == 123 || p == 5353 || p == 1900 || p == 8443 || p == 8080
+		// Heuristic: high rate of large UDP packets, or extremely high rate overall
+		udpTs, exists := st.IPUDPTimestamps[srcIP]
+		if !exists {
+			udpTs = make([]float64, 0, 5000)
 		}
-		isKnown := wellKnownPort(packet.SrcPort) || wellKnownPort(packet.DstPort)
+		udpRate := addTimestamp(&udpTs, currentTime)
+		st.IPUDPTimestamps[srcIP] = udpTs
 
-		if !isKnown {
-			udpTs, exists := st.IPUDPTimestamps[srcIP]
-			if !exists {
-				udpTs = make([]float64, 0, 5000)
-			}
-			udpRate := addTimestamp(&udpTs, currentTime)
-			st.IPUDPTimestamps[srcIP] = udpTs
+		// Adjust threshold if packets are large
+		effectiveThreshold := cfg.UDPFloodThreshold
+		if len(packet.Payload) > 1000 {
+			effectiveThreshold = cfg.UDPFloodThreshold / 2
+		}
 
-			if udpRate > cfg.UDPFloodThreshold {
-				triggerAlert(st, cfg, fm, currentTime, "NET-UDP-001", "UDP Flood", "Medium", "High", srcIP, dstIP, fmt.Sprintf("UDP Flood (%d pkts/s)", udpRate), float64(udpRate))
-			}
+		if udpRate > effectiveThreshold {
+			triggerAlert(st, cfg, fm, currentTime, "NET-UDP-001", "UDP Flood", "Medium", "High", srcIP, dstIP, fmt.Sprintf("UDP Flood (%d pkts/s)", udpRate), float64(udpRate))
 		}
 
 		// DNS Amplification
@@ -221,7 +223,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 			st.IPDNSReplyTimestamps[srcIP] = udpTs
 
 			if dnsRate > 20 {
-				triggerAlert(st, cfg, fm, currentTime, "NET-DNS-001", "DNS Amplification", "High", "High", srcIP, dstIP, fmt.Sprintf("DNS Amplification (%d pkts/3s)", dnsRate), float64(dnsRate))
+				triggerAlert(st, cfg, fm, currentTime, "NET-DNS-001", "DNS Amplification", "High", "Medium", srcIP, dstIP, fmt.Sprintf("Heuristic DNS Amplification (%d pkts/s)", dnsRate), float64(dnsRate))
 			}
 		}
 	}
@@ -285,30 +287,43 @@ func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 		alert.Status = "LOGGED"
 	} else {
 		if severity == "High" || severity == "Critical" || confidence == "High" || confidence == "Critical" {
-			alert.Action = "BLOCK"
-			if fm.BlockIP(srcIP, cfg) {
+			if strings.Contains(srcIP, ":") {
+				// Log IPv6 but do not attempt iptables blocking (which only supports IPv4)
+				alert.Action = "ALERT"
 				alert.ActionResult = "SUCCESS"
-				alert.Status = "BLOCKED"
-				expiresAt := currentTime + float64(cfg.BlockTTLSeconds)
-				alert.ExpiresAt = expiresAt
-
-				st.BlockedIPs[srcIP] = state.IPBlock{
-					IP:         srcIP,
-					RuleID:     ruleID,
-					Reason:     reason,
-					Confidence: confidence,
-					CreatedAt:  currentTime,
-					ExpiresAt:  expiresAt,
-				}
-
-				st.AddThreatTimeline(state.ThreatTimeline{
-					Timestamp: currentTime,
-					Event:     fmt.Sprintf("Blocked IP %s (Rule: %s)", srcIP, ruleID),
-					Severity:  severity,
-				})
+				alert.Status = "LOGGED (IPv6 BLOCKING UNSUPPORTED)"
 			} else {
-				alert.ActionResult = "FAILED"
-				alert.Status = "BLOCK_FAILED"
+				alert.Action = "BLOCK"
+				
+				// Drop the lock to perform potentially slow firewall operation
+				st.Mu.Unlock()
+				blockSuccess := fm.BlockIP(srcIP, cfg)
+				st.Mu.Lock()
+
+				if blockSuccess {
+					alert.ActionResult = "SUCCESS"
+					alert.Status = "BLOCKED"
+					expiresAt := currentTime + float64(cfg.BlockTTLSeconds)
+					alert.ExpiresAt = expiresAt
+
+					st.BlockedIPs[srcIP] = state.IPBlock{
+						IP:         srcIP,
+						RuleID:     ruleID,
+						Reason:     reason,
+						Confidence: confidence,
+						CreatedAt:  currentTime,
+						ExpiresAt:  expiresAt,
+					}
+
+					st.AddThreatTimeline(state.ThreatTimeline{
+						Timestamp: currentTime,
+						Event:     fmt.Sprintf("Blocked IP %s (Rule: %s)", srcIP, ruleID),
+						Severity:  severity,
+					})
+				} else {
+					alert.ActionResult = "FAILED"
+					alert.Status = "BLOCK_FAILED"
+				}
 			}
 		} else {
 			alert.Action = "ALERT"

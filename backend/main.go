@@ -15,24 +15,48 @@ import (
 	"idps-backend/config"
 	"idps-backend/firewall"
 	"idps-backend/state"
-
-	"github.com/joho/godotenv"
 )
 
 func main() {
 	fmt.Println("Starting IDPS Go Backend...")
 
 	cfg := config.Load()
-	fmt.Printf("Loaded Configuration: %+v\n", cfg)
+
+	fmt.Println("====================================")
+	fmt.Println("        IDPS GATEWAY STATUS")
+	fmt.Println("====================================")
+	fmt.Println()
+	fmt.Printf("Deployment : %s\n", cfg.IDPSDeploymentMode)
+	fmt.Printf("Security   : %s\n", cfg.IDPSSecurityMode)
+	fmt.Printf("WAN        : %s\n", cfg.WanInterface)
+	fmt.Printf("LAN        : %s\n", cfg.LanInterface)
+	fmt.Printf("Capture    : %s\n", cfg.CaptureInterface)
+	fmt.Println()
 
 	appState := state.NewAppState()
 	fwManager := firewall.NewFirewallManager()
 
-	// Setup Gateway if in GATEWAY mode
-	fwManager.SetupGateway(cfg)
+	// Setup Gateway if in NETWORK (or GATEWAY) mode
+	err := fwManager.SetupGateway(cfg)
+	if err != nil {
+		fmt.Printf("Gateway setup FAILED:\n  reason: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Firewall        : READY")
 
 	// Start packet capture
-	stopCapture := capture.StartCapture(appState, cfg, fwManager)
+	stopCapture, err := capture.StartCapture(appState, cfg, fwManager)
+	if err != nil {
+		fmt.Printf("Capture setup FAILED:\n  reason: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Capture         : RUNNING")
+	fmt.Println("Detection       : RUNNING")
+	fmt.Println("Prevention      : RUNNING")
+	fmt.Println()
+	fmt.Println("====================================")
 
 	// Start auto-unblock goroutine
 	ctx, cancel := context.WithCancel(context.Background())
@@ -46,19 +70,29 @@ func main() {
 			case <-ticker.C:
 				appState.Mu.Lock()
 				now := float64(time.Now().UnixNano()) / 1e9
+				var expiredIPs []string
+				var expiredRules []string
 				for ip, block := range appState.BlockedIPs {
 					if block.ExpiresAt > 0 && block.ExpiresAt <= now {
-						if fwManager.UnblockIP(ip, cfg) {
-							delete(appState.BlockedIPs, ip)
-							appState.AddThreatTimeline(state.ThreatTimeline{
-								Timestamp: now,
-								Event:     fmt.Sprintf("Auto-unblocked IP %s (Rule: %s expired)", ip, block.RuleID),
-								Severity:  "Info",
-							})
-						}
+						expiredIPs = append(expiredIPs, ip)
+						expiredRules = append(expiredRules, block.RuleID)
 					}
 				}
 				appState.Mu.Unlock()
+
+				// Unblock without holding the lock
+				for i, ip := range expiredIPs {
+					if fwManager.UnblockIP(ip, cfg) {
+						appState.Mu.Lock()
+						delete(appState.BlockedIPs, ip)
+						appState.AddThreatTimeline(state.ThreatTimeline{
+							Timestamp: now,
+							Event:     fmt.Sprintf("Auto-unblocked IP %s (Rule: %s expired)", ip, expiredRules[i]),
+							Severity:  "Info",
+						})
+						appState.Mu.Unlock()
+					}
+				}
 			}
 		}
 	}()
@@ -76,33 +110,32 @@ func main() {
 			stopCapture()
 		}
 		
-		envMap, err := godotenv.Read(".env")
-		if err != nil {
-			envMap = make(map[string]string)
-		}
-		envMap["IDPS_DEPLOYMENT_MODE"] = cfg.IDPSDeploymentMode
-		envMap["IDPS_SECURITY_MODE"] = cfg.IDPSSecurityMode
-		envMap["WAN_INTERFACE"] = cfg.WanInterface
-		envMap["LAN_INTERFACE"] = cfg.LanInterface
-		envMap["INTERFACE"] = cfg.Interface
-		_ = godotenv.Write(envMap, ".env")
+		// Note: We removed automatic godotenv.Write here per requirements to prevent unexpected overwrites.
 
 		// Re-setup firewall
-		fwManager.SetupGateway(cfg)
+		fwManager.TeardownGateway(cfg)
+		err := fwManager.SetupGateway(cfg)
+		if err != nil {
+			fmt.Printf("Gateway reload FAILED: %v\n", err)
+		}
 		
 		// Restart capture on new interface
-		stopCapture = capture.StartCapture(appState, cfg, fwManager)
+		stopCapture, err = capture.StartCapture(appState, cfg, fwManager)
+		if err != nil {
+			fmt.Printf("Capture reload FAILED: %v\n", err)
+		}
 	}
 
 	router := api.CreateRouter(apiState)
 
+	addr := fmt.Sprintf("%s:8000", cfg.ApiHost)
 	srv := &http.Server{
-		Addr:    "0.0.0.0:8000",
+		Addr:    addr,
 		Handler: router,
 	}
 
 	go func() {
-		fmt.Println("API and WebSocket listening on 0.0.0.0:8000")
+		fmt.Printf("API and WebSocket listening on %s\n", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %s\n", err)
 		}
