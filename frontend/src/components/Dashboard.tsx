@@ -6,8 +6,11 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { format } from 'date-fns';
 
 export default function Dashboard({ data, status }: { data: any, status: string }) {
-  // Keep local history of packet rates for the chart
-  const [packetHistory, setPacketHistory] = useState<{ time: string, packets: number }[]>([]);
+	// Keep local history of packet rates for the chart
+	const [packetHistory, setPacketHistory] = useState<{ time: string, packets: number }[]>([]);
+
+const API_HOST = window.location.hostname;
+const API_BASE = `http://${API_HOST}:8000`;
   const [showDevicesModal, setShowDevicesModal] = useState(false);
   const [showTrafficModal, setShowTrafficModal] = useState(false);
   const [showLiveTrafficModal, setShowLiveTrafficModal] = useState(false);
@@ -189,19 +192,6 @@ export default function Dashboard({ data, status }: { data: any, status: string 
             <h3 className="text-lg font-semibold flex items-center gap-2">
               <ArrowUpRight className="w-5 h-5 text-rose-500" /> All Source IPs
             </h3>
-            <button
-              onClick={async () => {
-                try {
-                  await fetch('http://localhost:8000/api/scan', { method: 'POST' });
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-              className="kinetic-card hover:bg-primary/20 text-primary px-3 py-1.5 rounded-lg transition-all font-medium flex items-center gap-2 text-xs"
-            >
-              <Network className="w-3.5 h-3.5" />
-              Scan Network
-            </button>
           </div>
           <div className="flex-1 overflow-y-auto pr-2 space-y-3">
             {mergedIPs.map((ip: any, i: number) => (
@@ -278,7 +268,7 @@ export default function Dashboard({ data, status }: { data: any, status: string 
               {blockedIPs.map((ip: string) => (
                 <div key={ip} className="px-3 py-1.5 kinetic-card text-red-500 rounded-lg font-mono text-sm flex items-center gap-2">
                   {ip}
-                  <button onClick={() => fetch(`http://localhost:8000/api/unblock/${ip}`, { method: 'POST' })} className="hover:text-red-400 transition-colors">
+                  <button onClick={() => fetch(`${API_BASE}/api/unblock/${ip}`, { method: 'POST' })} className="hover:text-red-400 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
                   </button>
                 </div>
@@ -329,19 +319,6 @@ export default function Dashboard({ data, status }: { data: any, status: string 
                   <Monitor className="w-5 h-5 text-emerald-500" /> Active Devices on Network
                 </h3>
                 <div className="flex items-center gap-2">
-                  <button 
-                    onClick={async () => {
-                      try {
-                        await fetch('http://localhost:8000/api/scan', { method: 'POST' });
-                      } catch (e) {
-                        console.error(e);
-                      }
-                    }}
-                    className="p-1 hover:bg-white/10 rounded-lg transition-colors text-muted-foreground hover:text-emerald-500"
-                    title="Refresh / Scan Network"
-                  >
-                    <RefreshCw className="w-5 h-5" />
-                  </button>
                   <button onClick={() => setShowDevicesModal(false)} className="p-1 hover:bg-white/10 rounded-lg transition-colors">
                     <X className="w-5 h-5" />
                   </button>

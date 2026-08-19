@@ -7,6 +7,10 @@ import ThreeDBackground from './components/ThreeDBackground';
 import { useWebSocket } from './hooks/useWebSocket';
 import { format } from 'date-fns';
 
+const API_HOST = window.location.hostname;
+const API_BASE = `http://${API_HOST}:8000`;
+const WS_URL = `ws://${API_HOST}:8000/ws`;
+
 // Error boundary to catch 3D/WebGL crashes
 class SafeBackground extends Component<{children: ReactNode}, {hasError: boolean}> {
   constructor(props: {children: ReactNode}) {
@@ -29,7 +33,7 @@ class SafeBackground extends Component<{children: ReactNode}, {hasError: boolean
 
 function App() {
   const [activeTab, setActiveTab] = useState(window.location.pathname.replace('/', '') || 'overview');
-  const { data, status } = useWebSocket('ws://localhost:8000/ws');
+  const { data, status } = useWebSocket(WS_URL);
 
   return (
     <Router>
@@ -85,7 +89,7 @@ function AlertsView({ data }: { data: any }) {
 
   const handleBlock = async (ip: string) => {
     try {
-      await fetch(`http://localhost:8000/api/block/${ip}`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/block/${ip}`, { method: 'POST' });
     } catch (e) {
       console.error(e);
     }
@@ -93,7 +97,7 @@ function AlertsView({ data }: { data: any }) {
 
   const handleDismiss = async (id: string) => {
     try {
-      await fetch(`http://localhost:8000/api/alerts/${id}`, { method: 'DELETE' });
+      await fetch(`${API_BASE}/api/alerts/${id}`, { method: 'DELETE' });
     } catch (e) {
       console.error(e);
     }
@@ -162,7 +166,7 @@ function BlockedIPsView({ data }: { data: any }) {
 
   const handleUnblock = async (ip: string) => {
     try {
-      await fetch(`http://localhost:8000/api/unblock/${ip}`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/unblock/${ip}`, { method: 'POST' });
     } catch (e) {
       console.error(e);
     }
@@ -218,7 +222,7 @@ function SettingsView() {
 
   // Fetch current settings on mount
   useEffect(() => {
-    fetch('http://localhost:8000/api/settings')
+    fetch(`${API_BASE}/api/settings`)
       .then(res => res.json())
       .then(data => {
         setSettings({
@@ -231,7 +235,7 @@ function SettingsView() {
       })
       .catch(console.error);
 
-    fetch('http://localhost:8000/api/interfaces')
+    fetch(`${API_BASE}/api/interfaces`)
       .then(res => res.json())
       .then(data => setInterfaces(data))
       .catch(console.error);
@@ -241,7 +245,7 @@ function SettingsView() {
     setSaving(true);
     setMessage('Applying changes to core system...');
     try {
-      const res = await fetch('http://localhost:8000/api/settings', {
+      const res = await fetch(`${API_BASE}/api/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings)

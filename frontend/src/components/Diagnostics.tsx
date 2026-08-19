@@ -6,8 +6,11 @@ export default function DiagnosticsView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  const API_HOST = window.location.hostname;
+  const API_BASE = `http://${API_HOST}:8000`;
+
   useEffect(() => {
-    fetch('http://localhost:8000/api/system/network-check')
+    fetch(`${API_BASE}/api/system/network-check`)
       .then(res => res.json())
       .then(data => {
         setData(data);

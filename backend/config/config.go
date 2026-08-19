@@ -65,7 +65,7 @@ func Load() *Config {
 		IDPSSecurityMode:        getEnv("IDPS_SECURITY_MODE", "IDS"),    // IDS or IPS
 		WanInterface:            getEnv("WAN_INTERFACE", autoWan),
 		LanInterface:            getEnv("LAN_INTERFACE", autoLan),
-		ApiHost:                 getEnv("API_HOST", "127.0.0.1"),
+		ApiHost:                 getEnv("API_HOST", "0.0.0.0"),
 		FirewallDryRun:          getEnvBool("FIREWALL_DRY_RUN", false),
 		SuspiciousRateThreshold: getEnvInt("SUSPICIOUS_RATE_THRESHOLD", 500),
 		PortScanThreshold:       getEnvInt("PORT_SCAN_THRESHOLD", 20),
