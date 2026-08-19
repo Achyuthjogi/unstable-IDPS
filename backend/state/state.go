@@ -70,6 +70,7 @@ type AppState struct {
 	IPDNSReplyTimestamps map[string][]float64
 	IPSYNTimestamps      map[string][]float64
 	IPSSHTimestamps      map[string][]float64
+	IPARPTimestamps      map[string][]float64
 
 	// Port scan tracking: src_ip -> { dst_port -> timestamp }
 	IPPortsAccessed map[string]map[uint16]float64
@@ -97,6 +98,7 @@ func NewAppState() *AppState {
 		IPDNSReplyTimestamps: make(map[string][]float64),
 		IPSYNTimestamps:      make(map[string][]float64),
 		IPSSHTimestamps:      make(map[string][]float64),
+		IPARPTimestamps:      make(map[string][]float64),
 		IPPortsAccessed:      make(map[string]map[uint16]float64),
 		IPMACMapping:       make(map[string]map[string]float64),
 		PortCounts:         make(map[uint16]int),

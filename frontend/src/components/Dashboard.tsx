@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-import { Activity, AlertOctagon, ShieldAlert, Cpu, Network, ArrowUpRight, Ban, X, Monitor, Maximize, RefreshCw, Search, Filter } from 'lucide-react';
+import { Activity, AlertOctagon, ShieldAlert, Cpu, Network, ArrowUpRight, Ban, X, Monitor, Maximize, Search, Filter } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Cell } from 'recharts';
 import { format } from 'date-fns';
 

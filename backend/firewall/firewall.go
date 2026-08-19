@@ -52,6 +52,14 @@ func (fm *FirewallManager) isSafeToBlock(ip string, cfg *config.Config) bool {
 	return true
 }
 
+// iptablesBin returns "ip6tables" for IPv6 addresses, "iptables" for IPv4.
+func iptablesBin(ip string) string {
+	if strings.Contains(ip, ":") {
+		return "ip6tables"
+	}
+	return "iptables"
+}
+
 func (fm *FirewallManager) runCommand(cfg *config.Config, name string, args ...string) error {
 	if cfg.FirewallDryRun {
 		fmt.Printf("[DRY RUN] Would execute: %s %s\n", name, strings.Join(args, " "))
@@ -61,18 +69,28 @@ func (fm *FirewallManager) runCommand(cfg *config.Config, name string, args ...s
 	return cmd.Run()
 }
 
-func (fm *FirewallManager) ruleExists(cfg *config.Config, args ...string) bool {
+func (fm *FirewallManager) ruleExists(cfg *config.Config, bin string, args ...string) bool {
 	if cfg.FirewallDryRun {
 		return false
 	}
-	checkArgs := append([]string{"-C"}, args[1:]...) // Replace -A/-I with -C
-	cmd := exec.Command("sudo", append([]string{"iptables"}, checkArgs...)...)
+	// Build a -C (check) command from the original args.
+	// -A CHAIN ... → -C CHAIN ...
+	// -I CHAIN pos ... → -C CHAIN ...  (strip the position number)
+	var checkArgs []string
+	if len(args) > 0 && args[0] == "-I" && len(args) > 2 {
+		// args = ["-I", "CHAIN", "pos", rest...]
+		// Skip args[0] ("-I") and args[2] (position number)
+		checkArgs = append([]string{"-C", args[1]}, args[3:]...)
+	} else {
+		checkArgs = append([]string{"-C"}, args[1:]...)
+	}
+	cmd := exec.Command("sudo", append([]string{bin}, checkArgs...)...)
 	return cmd.Run() == nil
 }
 
-func (fm *FirewallManager) ensureRule(cfg *config.Config, args ...string) error {
-	if !fm.ruleExists(cfg, args...) {
-		return fm.runCommand(cfg, "sudo", append([]string{"iptables"}, args...)...)
+func (fm *FirewallManager) ensureRule(cfg *config.Config, bin string, args ...string) error {
+	if !fm.ruleExists(cfg, bin, args...) {
+		return fm.runCommand(cfg, "sudo", append([]string{bin}, args...)...)
 	}
 	return nil
 }
@@ -118,19 +136,19 @@ func (fm *FirewallManager) SetupGateway(cfg *config.Config) error {
 	}
 
 	// NAT Rule
-	err := fm.ensureRule(cfg, "-t", "nat", "-A", "POSTROUTING", "-o", cfg.WanInterface, "-m", "comment", "--comment", "IDPS-NAT", "-j", "MASQUERADE")
+	err := fm.ensureRule(cfg, "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", cfg.WanInterface, "-m", "comment", "--comment", "IDPS-NAT", "-j", "MASQUERADE")
 	if err != nil {
 		return fmt.Errorf("failed to configure NAT: %v", err)
 	}
 
 	// FORWARD WAN -> LAN (established/related)
-	err = fm.ensureRule(cfg, "-A", "FORWARD", "-i", cfg.WanInterface, "-o", cfg.LanInterface, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-m", "comment", "--comment", "IDPS-FWD-IN", "-j", "ACCEPT")
+	err = fm.ensureRule(cfg, "iptables", "-A", "FORWARD", "-i", cfg.WanInterface, "-o", cfg.LanInterface, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-m", "comment", "--comment", "IDPS-FWD-IN", "-j", "ACCEPT")
 	if err != nil {
 		return fmt.Errorf("failed to configure WAN->LAN forwarding: %v", err)
 	}
 
 	// FORWARD LAN -> WAN
-	err = fm.ensureRule(cfg, "-A", "FORWARD", "-i", cfg.LanInterface, "-o", cfg.WanInterface, "-m", "comment", "--comment", "IDPS-FWD-OUT", "-j", "ACCEPT")
+	err = fm.ensureRule(cfg, "iptables", "-A", "FORWARD", "-i", cfg.LanInterface, "-o", cfg.WanInterface, "-m", "comment", "--comment", "IDPS-FWD-OUT", "-j", "ACCEPT")
 	if err != nil {
 		return fmt.Errorf("failed to configure LAN->WAN forwarding: %v", err)
 	}
@@ -163,20 +181,21 @@ func (fm *FirewallManager) BlockIP(ip string, cfg *config.Config) bool {
 		return false
 	}
 
+	bin := iptablesBin(ip)
 	success := true
 
 	if cfg.IDPSDeploymentMode == "HOST" {
 		args := []string{"-I", "INPUT", "1", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP"}
-		if err := fm.ensureRule(cfg, args...); err == nil {
-			fmt.Printf("FirewallManager: Added Linux rule to block %s on INPUT\n", ip)
+		if err := fm.ensureRule(cfg, bin, args...); err == nil {
+			fmt.Printf("FirewallManager: Added %s rule to block %s on INPUT\n", bin, ip)
 		} else {
 			fmt.Printf("FirewallManager: Failed to block %s on INPUT: %v\n", ip, err)
 			success = false
 		}
 	} else if cfg.IDPSDeploymentMode == "GATEWAY" || cfg.IDPSDeploymentMode == "NETWORK" {
 		args := []string{"-I", "FORWARD", "1", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP"}
-		if err := fm.ensureRule(cfg, args...); err == nil {
-			fmt.Printf("FirewallManager: Added Linux rule to block %s on FORWARD\n", ip)
+		if err := fm.ensureRule(cfg, bin, args...); err == nil {
+			fmt.Printf("FirewallManager: Added %s rule to block %s on FORWARD\n", bin, ip)
 		} else {
 			fmt.Printf("FirewallManager: Failed to block %s on FORWARD: %v\n", ip, err)
 			success = false
@@ -187,18 +206,19 @@ func (fm *FirewallManager) BlockIP(ip string, cfg *config.Config) bool {
 }
 
 func (fm *FirewallManager) UnblockIP(ip string, cfg *config.Config) bool {
+	bin := iptablesBin(ip)
 	success := true
 
 	if cfg.IDPSDeploymentMode == "HOST" {
-		if err := fm.runCommand(cfg, "sudo", "iptables", "-D", "INPUT", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP"); err == nil {
-			fmt.Printf("FirewallManager: Removed Linux rule for %s from INPUT\n", ip)
+		if err := fm.runCommand(cfg, "sudo", bin, "-D", "INPUT", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP"); err == nil {
+			fmt.Printf("FirewallManager: Removed %s rule for %s from INPUT\n", bin, ip)
 		} else {
 			fmt.Printf("FirewallManager: Failed to unblock %s from INPUT: %v\n", ip, err)
 			success = false
 		}
 	} else if cfg.IDPSDeploymentMode == "GATEWAY" || cfg.IDPSDeploymentMode == "NETWORK" {
-		if err := fm.runCommand(cfg, "sudo", "iptables", "-D", "FORWARD", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP"); err == nil {
-			fmt.Printf("FirewallManager: Removed Linux rule for %s from FORWARD\n", ip)
+		if err := fm.runCommand(cfg, "sudo", bin, "-D", "FORWARD", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP"); err == nil {
+			fmt.Printf("FirewallManager: Removed %s rule for %s from FORWARD\n", bin, ip)
 		} else {
 			fmt.Printf("FirewallManager: Failed to unblock %s from FORWARD: %v\n", ip, err)
 			success = false

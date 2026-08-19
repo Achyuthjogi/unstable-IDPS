@@ -13,7 +13,9 @@ import (
 	"idps-backend/api"
 	"idps-backend/capture"
 	"idps-backend/config"
+	"idps-backend/detection"
 	"idps-backend/firewall"
+	"idps-backend/rules"
 	"idps-backend/state"
 )
 
@@ -45,8 +47,19 @@ func main() {
 
 	fmt.Println("Firewall        : READY")
 
+	// Setup Rule Engine
+	ruleEngine := rules.NewEngine()
+	if err := rules.LoadRulesFromDirectory(cfg.RulesPath, ruleEngine); err != nil {
+		fmt.Printf("Warning: Could not load rules from %s: %v\n", cfg.RulesPath, err)
+	}
+	ruleEngine.Build()
+	fmt.Printf("Rule Engine     : READY (Rules loaded: %d)\n", len(ruleEngine.Rules))
+
+	// Setup Detection Engine
+	detEngine := detection.NewEngine(appState, cfg, fwManager, ruleEngine)
+
 	// Start packet capture
-	stopCapture, err := capture.StartCapture(appState, cfg, fwManager)
+	stopCapture, err := capture.StartCapture(appState, cfg, fwManager, detEngine)
 	if err != nil {
 		fmt.Printf("Capture setup FAILED:\n  reason: %v\n", err)
 		os.Exit(1)
@@ -120,7 +133,7 @@ func main() {
 		}
 		
 		// Restart capture on new interface
-		stopCapture, err = capture.StartCapture(appState, cfg, fwManager)
+		stopCapture, err = capture.StartCapture(appState, cfg, fwManager, detEngine)
 		if err != nil {
 			fmt.Printf("Capture reload FAILED: %v\n", err)
 		}

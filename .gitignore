@@ -1,5 +1,6 @@
 # Environments
 .env
+.env.*
 
 # Node
 frontend/node_modules/
@@ -25,3 +26,4 @@ backend/idps-backend
 
 # Logs
 *.log
+backend/alerts.json

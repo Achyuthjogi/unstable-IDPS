@@ -21,7 +21,7 @@ func getTimestamp() float64 {
 	return float64(time.Now().UnixNano()) / 1e9
 }
 
-func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager) (func(), error) {
+func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, engine *detection.Engine) (func(), error) {
 	ifaceName := cfg.CaptureInterface
 	fmt.Printf("Starting capture on interface: %s\n", ifaceName)
 
@@ -50,7 +50,7 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 		go func(ch chan detection.PacketInfo) {
 			defer wg.Done()
 			for pkt := range ch {
-				detection.AnalyzePacket(st, cfg, fm, pkt)
+				engine.ProcessPacket(pkt)
 			}
 		}(channels[i])
 	}
@@ -100,6 +100,11 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 				pktInfo.DstMAC = eth.DstMAC.String()
 				if eth.EthernetType == layers.EthernetTypeARP {
 					pktInfo.Protocol = "ARP"
+					arpLayer := packet.Layer(layers.LayerTypeARP)
+					if arpLayer != nil {
+						arp, _ := arpLayer.(*layers.ARP)
+						pktInfo.ARPOperation = arp.Operation
+					}
 				}
 			} else {
 				// Try Linux SLL
@@ -137,6 +142,7 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 				pktInfo.IsTCPSYN = tcp.SYN
 				pktInfo.IsTCPACK = tcp.ACK
 				pktInfo.IsTCPRST = tcp.RST
+				pktInfo.Seq = tcp.Seq
 				pktInfo.Payload = tcp.Payload
 
 				if len(tcp.Payload) > 0 {

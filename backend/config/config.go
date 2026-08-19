@@ -28,6 +28,12 @@ type Config struct {
 	BlockTTLSeconds         int
 	GatewayIP               string
 	WorkerCount             int
+
+	// Snort Engine Config
+	RulesPath     string
+	AlertLogPath  string
+	MaxFlows      int
+	MaxReassembly int
 }
 
 func DiscoverInterfaces() (string, string) {
@@ -67,7 +73,7 @@ func Load() *Config {
 		LanInterface:            getEnv("LAN_INTERFACE", autoLan),
 		ApiHost:                 getEnv("API_HOST", "0.0.0.0"),
 		FirewallDryRun:          getEnvBool("FIREWALL_DRY_RUN", false),
-		SuspiciousRateThreshold: getEnvInt("SUSPICIOUS_RATE_THRESHOLD", 500),
+		SuspiciousRateThreshold: getEnvInt("SUSPICIOUS_RATE_THRESHOLD", 5000),
 		PortScanThreshold:       getEnvInt("PORT_SCAN_THRESHOLD", 20),
 		ICMPFloodThreshold:      getEnvInt("ICMP_FLOOD_THRESHOLD", 100),
 		UDPFloodThreshold:       getEnvInt("UDP_FLOOD_THRESHOLD", 200),
@@ -76,6 +82,10 @@ func Load() *Config {
 		BlockTTLSeconds:         getEnvInt("BLOCK_TTL_SECONDS", 600),
 		GatewayIP:               getEnv("GATEWAY_IP", ""),
 		WorkerCount:             getEnvInt("WORKER_COUNT", runtime.NumCPU()),
+		RulesPath:               getEnv("RULES_PATH", "./rules"),
+		AlertLogPath:            getEnv("ALERT_LOG_PATH", "alerts.json"),
+		MaxFlows:                getEnvInt("MAX_FLOWS", 100000),
+		MaxReassembly:           getEnvInt("MAX_REASSEMBLY", 65535),
 	}
 
 	cfg.Interface = getEnv("INTERFACE", cfg.LanInterface)

@@ -1,0 +1,12 @@
+# Web Application Attacks
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"SQL Injection Attempt (UNION SELECT)"; flow:established,to_server; content:"UNION"; nocase; content:"SELECT"; nocase; distance:0; classtype:web-application-attack; sid:1000001; rev:1; priority:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"SQL Injection Attempt (OR 1=1)"; flow:established,to_server; content:"OR"; nocase; content:"1=1"; nocase; distance:0; classtype:web-application-attack; sid:1000002; rev:1; priority:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"Cross-Site Scripting (XSS) Attempt"; flow:established,to_server; content:"<script>"; nocase; classtype:web-application-attack; sid:1000003; rev:1; priority:2;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"Directory Traversal Attempt"; flow:established,to_server; content:"../"; classtype:web-application-attack; sid:1000004; rev:1; priority:2;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"Command Injection Attempt"; flow:established,to_server; content:"; cat /etc/passwd"; classtype:web-application-attack; sid:1000005; rev:1; priority:1;)
+
+# Exploits & Shellcode
+alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"NOP Sled Detected (Buffer Overflow)"; flow:established,to_server; content:"|90 90 90 90 90 90 90 90|"; classtype:attempted-admin; sid:1000101; rev:1; priority:1;)
+
+# Protocol Anomalies
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (msg:"Invalid HTTP Method"; flow:established,to_server; content:"INVALIDMETHOD"; classtype:protocol-command-decode; sid:1000201; rev:1; priority:3;)
