@@ -11,6 +11,7 @@ import (
 	"idps-backend/detection"
 	"idps-backend/firewall"
 	"idps-backend/state"
+	"net"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -104,6 +105,8 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 					if arpLayer != nil {
 						arp, _ := arpLayer.(*layers.ARP)
 						pktInfo.ARPOperation = arp.Operation
+						pktInfo.SrcIP = net.IP(arp.SourceProtAddress).String()
+						pktInfo.DstIP = net.IP(arp.DstProtAddress).String()
 					}
 				}
 			} else {
@@ -159,6 +162,38 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 
 					if udp.DstPort == 53 || udp.SrcPort == 53 {
 						extractDNSLog(st, ts, pktInfo.SrcIP, udp.Payload)
+					}
+
+					// DHCP Offer detection
+					if udp.SrcPort == 67 && len(udp.Payload) > 240 {
+						if udp.Payload[0] == 2 { // BOOTREPLY
+							// Check magic cookie
+							if udp.Payload[236] == 99 && udp.Payload[237] == 130 && udp.Payload[238] == 83 && udp.Payload[239] == 99 {
+								offset := 240
+								for offset < len(udp.Payload) {
+									opt := udp.Payload[offset]
+									if opt == 255 {
+										break
+									}
+									if opt == 0 {
+										offset++
+										continue
+									}
+									if offset+1 >= len(udp.Payload) {
+										break
+									}
+									length := int(udp.Payload[offset+1])
+									if offset+2+length > len(udp.Payload) {
+										break
+									}
+									if opt == 53 && length == 1 && udp.Payload[offset+2] == 2 { // Message Type: DHCPOFFER
+										pktInfo.IsDHCPOffer = true
+										break
+									}
+									offset += 2 + length
+								}
+							}
+						}
 					}
 				} else {
 					icmp4Layer := packet.Layer(layers.LayerTypeICMPv4)

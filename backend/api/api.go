@@ -23,7 +23,7 @@ type ApiState struct {
 	St       *state.AppState
 	Config   *config.Config
 	Firewall *firewall.FirewallManager
-	Reload   func()
+	Reload   func(oldConfig *config.Config)
 }
 
 func CreateRouter(apiState *ApiState) http.Handler {
@@ -222,6 +222,8 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	
+	oldConfig := *api.Config
 
 	if val, ok := body["IDPS_DEPLOYMENT_MODE"]; ok {
 		if val != "HOST" && val != "NETWORK" && val != "GATEWAY" {
@@ -245,12 +247,18 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	}
 	if val, ok := body["INTERFACE"]; ok {
 		api.Config.Interface = val
-		api.Config.CaptureInterface = val
+	}
+
+	if api.Config.IDPSDeploymentMode == "GATEWAY" || api.Config.IDPSDeploymentMode == "NETWORK" {
+		api.Config.CaptureInterface = api.Config.LanInterface
+	} else {
+		api.Config.CaptureInterface = api.Config.Interface
 	}
 
 	// Trigger hot-reload in main
 	if api.Reload != nil {
-		api.Reload()
+		oldCfg := oldConfig // Create a local copy to take pointer
+		api.Reload(&oldCfg)
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Configuration applied successfully."})
@@ -298,6 +306,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 
 		api.St.Mu.RLock()
 
+		packetCount := api.St.PacketCount
+		activeConns := api.St.ActiveConnections
+		alertsCount := len(api.St.Alerts)
+		blockedIPsCount := len(api.St.BlockedIPs)
+
 		// Top SRC IPs
 		type ipCount struct {
 			IP    string `json:"ip"`
@@ -306,15 +319,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		var topSrcIPs []ipCount
 		for ip, ts := range api.St.IPPacketTimestamps {
 			topSrcIPs = append(topSrcIPs, ipCount{IP: ip, Count: len(ts)})
-		}
-		sort.Slice(topSrcIPs, func(i, j int) bool {
-			return topSrcIPs[i].Count > topSrcIPs[j].Count
-		})
-		if len(topSrcIPs) > 10 {
-			topSrcIPs = topSrcIPs[:10]
-		}
-		if topSrcIPs == nil {
-			topSrcIPs = make([]ipCount, 0)
 		}
 
 		// Top DST Ports
@@ -326,18 +330,14 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		for port, count := range api.St.PortCounts {
 			topDstPorts = append(topDstPorts, portCount{Port: port, Count: count})
 		}
-		sort.Slice(topDstPorts, func(i, j int) bool {
-			return topDstPorts[i].Count > topDstPorts[j].Count
-		})
-		if len(topDstPorts) > 5 {
-			topDstPorts = topDstPorts[:5]
-		}
-		if topDstPorts == nil {
-			topDstPorts = make([]portCount, 0)
+
+		// Protocol counts (must copy to avoid concurrent map read/write during JSON marshal)
+		protocolCounts := make(map[string]int)
+		for k, v := range api.St.ProtocolCounts {
+			protocolCounts[k] = v
 		}
 
 		// Alerts (last 10 reversed)
-		alertsCount := len(api.St.Alerts)
 		var recentAlerts []state.Alert
 		startIdx := alertsCount - 10
 		if startIdx < 0 {
@@ -370,7 +370,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 
 		// Timeline (last 20 reversed)
 		var timeline []map[string]interface{}
-		// In Rust: "timeline": st.alerts.iter().rev().take(20).map(...)
 		timelineStart := alertsCount - 20
 		if timelineStart < 0 {
 			timelineStart = 0
@@ -401,19 +400,45 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 			recentTraffic = make([]state.TrafficLog, 0)
 		}
 
+		api.St.Mu.RUnlock()
+
+		// --- Perform sorting outside the lock to minimize contention ---
+
+		sort.Slice(topSrcIPs, func(i, j int) bool {
+			return topSrcIPs[i].Count > topSrcIPs[j].Count
+		})
+		if len(topSrcIPs) > 10 {
+			topSrcIPs = topSrcIPs[:10]
+		}
+		if topSrcIPs == nil {
+			topSrcIPs = make([]ipCount, 0)
+		}
+
+		sort.Slice(topDstPorts, func(i, j int) bool {
+			return topDstPorts[i].Count > topDstPorts[j].Count
+		})
+		if len(topDstPorts) > 5 {
+			topDstPorts = topDstPorts[:5]
+		}
+		if topDstPorts == nil {
+			topDstPorts = make([]portCount, 0)
+		}
+
+		// --- Build JSON payload ---
+
 		data := map[string]interface{}{
 			"system": map[string]interface{}{
 				"cpu":                cpuUsage,
 				"memory":             memUsage,
-				"active_connections": api.St.ActiveConnections,
+				"active_connections": activeConns,
 			},
 			"network": map[string]interface{}{
-				"packet_count":      api.St.PacketCount,
-				"protocol_counts":   api.St.ProtocolCounts,
+				"packet_count":      packetCount,
+				"protocol_counts":   protocolCounts,
 				"top_src_ips":       topSrcIPs,
 				"top_dst_ports":     topDstPorts,
 				"alerts_count":      alertsCount,
-				"blocked_ips_count": len(api.St.BlockedIPs),
+				"blocked_ips_count": blockedIPsCount,
 			},
 			"alerts":      recentAlerts,
 			"devices":     devices,
@@ -421,8 +446,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 			"timeline":    timeline,
 			"traffic_log": recentTraffic,
 		}
-
-		api.St.Mu.RUnlock()
 
 		if err := conn.WriteJSON(data); err != nil {
 			break

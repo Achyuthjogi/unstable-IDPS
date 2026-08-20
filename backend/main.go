@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"idps-backend/alert"
 	"idps-backend/api"
 	"idps-backend/capture"
 	"idps-backend/config"
@@ -23,6 +24,11 @@ func main() {
 	fmt.Println("Starting IDPS Go Backend...")
 
 	cfg := config.Load()
+
+	alertLogger, err := alert.NewLogger(cfg.AlertLogPath)
+	if err != nil {
+		fmt.Printf("Warning: could not open alert log: %v\n", err)
+	}
 
 	fmt.Println("====================================")
 	fmt.Println("        IDPS GATEWAY STATUS")
@@ -39,7 +45,7 @@ func main() {
 	fwManager := firewall.NewFirewallManager()
 
 	// Setup Gateway if in NETWORK (or GATEWAY) mode
-	err := fwManager.SetupGateway(cfg)
+	err = fwManager.SetupGateway(cfg)
 	if err != nil {
 		fmt.Printf("Gateway setup FAILED:\n  reason: %v\n", err)
 		os.Exit(1)
@@ -56,7 +62,7 @@ func main() {
 	fmt.Printf("Rule Engine     : READY (Rules loaded: %d)\n", len(ruleEngine.Rules))
 
 	// Setup Detection Engine
-	detEngine := detection.NewEngine(appState, cfg, fwManager, ruleEngine)
+	detEngine := detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger)
 
 	// Start packet capture
 	stopCapture, err := capture.StartCapture(appState, cfg, fwManager, detEngine)
@@ -117,7 +123,7 @@ func main() {
 		Firewall: fwManager,
 	}
 	
-	apiState.Reload = func() {
+	apiState.Reload = func(oldConfig *config.Config) {
 		fmt.Println("Reloading configuration and services...")
 		if stopCapture != nil {
 			stopCapture()
@@ -125,8 +131,8 @@ func main() {
 		
 		// Note: We removed automatic godotenv.Write here per requirements to prevent unexpected overwrites.
 
-		// Re-setup firewall
-		fwManager.TeardownGateway(cfg)
+		// Re-setup firewall using oldConfig to teardown correctly
+		fwManager.TeardownGateway(oldConfig)
 		err := fwManager.SetupGateway(cfg)
 		if err != nil {
 			fmt.Printf("Gateway reload FAILED: %v\n", err)
@@ -162,6 +168,9 @@ func main() {
 
 	// Teardown Gateway before exiting
 	fwManager.TeardownGateway(cfg)
+	if alertLogger != nil {
+		alertLogger.Close()
+	}
 	cancel() // stop auto-unblock goroutine
 	if stopCapture != nil {
 		stopCapture() // wait for capture to stop completely

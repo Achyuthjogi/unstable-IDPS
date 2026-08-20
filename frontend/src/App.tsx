@@ -253,7 +253,7 @@ function SettingsView() {
       const data = await res.json();
       setMessage(data.message || 'Configuration applied successfully.');
       setTimeout(() => setMessage(''), 3000);
-    } catch (e) {
+    } catch {
       setMessage('Failed to apply configuration. Check connection.');
     } finally {
       setSaving(false);

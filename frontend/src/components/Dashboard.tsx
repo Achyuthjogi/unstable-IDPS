@@ -48,7 +48,7 @@ const API_BASE = `http://${API_HOST}:8000`;
     }
 
     return Array.from(ipMap.values()).sort((a, b) => b.count - a.count);
-  }, [data?.network?.top_src_ips, data?.devices]);
+  }, [data]);
 
   const blockedIPs = useMemo(() => {
     if (!data?.blocked) return [];

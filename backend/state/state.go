@@ -2,6 +2,7 @@ package state
 
 import (
 	"sync"
+	"time"
 )
 
 type Device struct {
@@ -93,7 +94,7 @@ type AppState struct {
 }
 
 func NewAppState() *AppState {
-	return &AppState{
+	st := &AppState{
 		BlockedIPs:         make(map[string]IPBlock),
 		Devices:            make(map[string]*Device),
 		Alerts:             make([]Alert, 0, 1000),
@@ -115,6 +116,8 @@ func NewAppState() *AppState {
 		ProtocolCounts:     make(map[string]int),
 		LastAlertTimes:     make(map[string]float64),
 	}
+	go st.cleanupLoop()
+	return st
 }
 
 func (s *AppState) AddAlert(alert Alert) {
@@ -135,5 +138,89 @@ func (s *AppState) AddThreatTimeline(tl ThreatTimeline) {
 	s.ThreatTimeline = append(s.ThreatTimeline, tl)
 	if len(s.ThreatTimeline) > 500 {
 		s.ThreatTimeline = s.ThreatTimeline[1:]
+	}
+}
+
+// cleanupLoop periodically prunes expired state to prevent memory exhaustion (OOM).
+func (s *AppState) cleanupLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := float64(time.Now().UnixNano()) / 1e9
+
+		s.Mu.Lock()
+
+		// Helper to clean timestamp arrays (expire after 5 minutes)
+		cleanTimestamps := func(m map[string][]float64) {
+			for k, ts := range m {
+				if len(ts) == 0 || now-ts[len(ts)-1] > 300.0 {
+					delete(m, k)
+				}
+			}
+		}
+
+		cleanTimestamps(s.IPPacketTimestamps)
+		cleanTimestamps(s.IPICMPTimestamps)
+		cleanTimestamps(s.IPUDPTimestamps)
+		cleanTimestamps(s.IPDNSReplyTimestamps)
+		cleanTimestamps(s.IPSYNTimestamps)
+		cleanTimestamps(s.IPSSHTimestamps)
+		cleanTimestamps(s.IPARPTimestamps)
+
+		// Clean nested maps
+		for srcIP, portMap := range s.IPPortsAccessed {
+			for port, t := range portMap {
+				if now-t > 300.0 {
+					delete(portMap, port)
+				}
+			}
+			if len(portMap) == 0 {
+				delete(s.IPPortsAccessed, srcIP)
+			}
+		}
+
+		for srcIP, ipMap := range s.IPICMPSweep {
+			for ip, t := range ipMap {
+				if now-t > 300.0 {
+					delete(ipMap, ip)
+				}
+			}
+			if len(ipMap) == 0 {
+				delete(s.IPICMPSweep, srcIP)
+			}
+		}
+
+		for srcIP, macMap := range s.IPMACMapping {
+			for mac, t := range macMap {
+				if now-t > 300.0 {
+					delete(macMap, mac)
+				}
+			}
+			if len(macMap) == 0 {
+				delete(s.IPMACMapping, srcIP)
+			}
+		}
+
+		// Clean flat maps
+		for mac, t := range s.GlobalMACsSeen {
+			if now-t > 300.0 {
+				delete(s.GlobalMACsSeen, mac)
+			}
+		}
+
+		for mac, t := range s.DHCPStarvation {
+			if now-t > 300.0 {
+				delete(s.DHCPStarvation, mac)
+			}
+		}
+
+		for key, t := range s.LastAlertTimes {
+			if now-t > 300.0 {
+				delete(s.LastAlertTimes, key)
+			}
+		}
+
+		s.Mu.Unlock()
 	}
 }

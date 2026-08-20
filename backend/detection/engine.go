@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"idps-backend/alert"
 	"idps-backend/config"
 	"idps-backend/firewall"
 	"idps-backend/flow"
@@ -26,10 +27,11 @@ type Engine struct {
 	State        *state.AppState
 	Config       *config.Config
 	Firewall     *firewall.FirewallManager
+	AlertLogger  *alert.Logger
 }
 
 // NewEngine initializes the detection engine.
-func NewEngine(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, re *rules.Engine) *Engine {
+func NewEngine(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, re *rules.Engine, alertLogger *alert.Logger) *Engine {
 	return &Engine{
 		Tracker:     flow.NewTracker(100000, 120*time.Second, 65535),
 		RuleEngine:  re,
@@ -39,13 +41,14 @@ func NewEngine(st *state.AppState, cfg *config.Config, fm *firewall.FirewallMana
 		State:       st,
 		Config:      cfg,
 		Firewall:    fm,
+		AlertLogger: alertLogger,
 	}
 }
 
 // ProcessPacket is the main entry point for the new detection pipeline.
 func (e *Engine) ProcessPacket(packet PacketInfo) {
 	// 1. Run preserved rate-based heuristics and device tracking
-	AnalyzePacket(e.State, e.Config, e.Firewall, packet)
+	AnalyzePacket(e.State, e.Config, e.Firewall, e.AlertLogger, packet)
 
 	// 2. Flow Tracking & Reassembly
 	if packet.SrcIP == "" || packet.DstIP == "" || packet.Protocol == "ARP" {
@@ -109,16 +112,20 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 
 	// 4. Rule Evaluation (on reassembled stream)
 	var searchPayload []byte
+	f.Mu.Lock()
 	if isClientToServer {
-		searchPayload = f.ClientStream.Data
+		searchPayload = make([]byte, len(f.ClientStream.Data))
+		copy(searchPayload, f.ClientStream.Data)
 	} else {
-		searchPayload = f.ServerStream.Data
+		searchPayload = make([]byte, len(f.ServerStream.Data))
+		copy(searchPayload, f.ServerStream.Data)
 	}
+	f.Mu.Unlock()
 
 	if len(searchPayload) > 0 && e.RuleEngine != nil {
 		matchedRules := e.RuleEngine.Match(searchPayload)
 		for _, r := range matchedRules {
-			if !ruleHeaderMatch(r, packet.Protocol, packet.SrcPort, packet.DstPort, isClientToServer) {
+			if !ruleHeaderMatch(r, packet.Protocol, packet.SrcIP, packet.DstIP, packet.SrcPort, packet.DstPort, isClientToServer) {
 				continue
 			}
 
@@ -132,45 +139,52 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 			ruleID := fmt.Sprintf("SID-%d", r.SID)
 			
 			e.State.Mu.Lock()
-			triggerAlert(e.State, e.Config, e.Firewall, float64(time.Now().UnixNano())/1e9, ruleID, r.Classtype, severity, "High", packet.SrcIP, packet.DstIP, r.Msg, 1.0)
+			triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, r.Classtype, severity, "High", packet.SrcIP, packet.DstIP, r.Msg, 1.0)
 			e.State.Mu.Unlock()
 		}
 	}
 }
 
-func ruleHeaderMatch(r *rules.Rule, proto string, pktSrcPort, pktDstPort uint16, isClientToServer bool) bool {
+func ruleHeaderMatch(r *rules.Rule, proto string, pktSrcIP, pktDstIP string, pktSrcPort, pktDstPort uint16, isClientToServer bool) bool {
 	if r.Protocol != "ip" && r.Protocol != "any" && strings.ToLower(r.Protocol) != strings.ToLower(proto) {
 		return false
 	}
 	
-	// If rule specifies a direction, we check if the packet direction matches the rule direction.
-	// Typically Snort rules use '->' to mean from Src to Dst.
-	var ruleSrcPort string
-	var ruleDstPort string
-	
-	if isClientToServer {
-		ruleSrcPort = r.SrcPort
-		ruleDstPort = r.DstPort
-	} else {
-		// If server to client, the packet's source is the rule's destination if direction is ->
-		if r.Direction == "->" {
-			return false // Unidirectional rule doesn't match response traffic
+	matchForward := ipMatch(r.SrcNet, pktSrcIP) && ipMatch(r.DstNet, pktDstIP) && portMatch(r.SrcPort, pktSrcPort) && portMatch(r.DstPort, pktDstPort)
+	if matchForward {
+		return true
+	}
+
+	if r.Direction == "<>" {
+		matchBackward := ipMatch(r.DstNet, pktSrcIP) && ipMatch(r.SrcNet, pktDstIP) && portMatch(r.DstPort, pktSrcPort) && portMatch(r.SrcPort, pktDstPort)
+		if matchBackward {
+			return true
 		}
-		// If bidirectional <>, swap the check
-		ruleSrcPort = r.DstPort
-		ruleDstPort = r.SrcPort
 	}
 
-	if !portMatch(ruleSrcPort, pktSrcPort) {
-		return false
-	}
-	if !portMatch(ruleDstPort, pktDstPort) {
-		return false
-	}
-
-	return true
+	return false
 }
 
+func ipMatch(ruleNet, pktIP string) bool {
+	if ruleNet == "any" || ruleNet == "" {
+		return true
+	}
+	// Check for CIDR
+	if strings.Contains(ruleNet, "/") {
+		_, ipNet, err := net.ParseCIDR(ruleNet)
+		if err == nil && ipNet != nil {
+			parsedIP := net.ParseIP(pktIP)
+			if parsedIP != nil && ipNet.Contains(parsedIP) {
+				return true
+			}
+			return false
+		}
+	}
+	// Exact IP match
+	return ruleNet == pktIP
+}
+
+// TODO: Full Snort-style variable expansion ($HTTP_PORTS, $HOME_NET, $EXTERNAL_NET) is not yet implemented
 func portMatch(rulePort string, pktPort uint16) bool {
 	if rulePort == "any" || rulePort == "" {
 		return true
@@ -193,6 +207,6 @@ func (e *Engine) triggerRuleAlert(srcIP, dstIP, msg, classType string, priority 
 	}
 
 	e.State.Mu.Lock()
-	triggerAlert(e.State, e.Config, e.Firewall, float64(time.Now().UnixNano())/1e9, ruleID, classType, severity, "High", srcIP, dstIP, msg, 1.0)
+	triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, classType, severity, "High", srcIP, dstIP, msg, 1.0)
 	e.State.Mu.Unlock()
 }

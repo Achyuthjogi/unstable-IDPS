@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"idps-backend/alert"
 	"idps-backend/config"
 	"idps-backend/detection"
 	"idps-backend/firewall"
@@ -40,7 +41,8 @@ func main() {
 	
 	fmt.Printf("Loaded %d rules into engine.\n\n", len(ruleEngine.Rules))
 
-	detEngine := detection.NewEngine(appState, cfg, fwManager, ruleEngine)
+	alertLogger, _ := alert.NewLogger("")
+	detEngine := detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger)
 
 	var seq uint32 = 1000
 	var simTime float64 = float64(time.Now().UnixNano()) / 1e9

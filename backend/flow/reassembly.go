@@ -97,8 +97,16 @@ func (sr *StreamReassembler) drainChunks() {
 			sr.NextSeq += uint32(len(c.data))
 		} else if c.seq > sr.NextSeq {
 			keep = append(keep, c)
+		} else {
+			// c.seq < sr.NextSeq implies overlapping or duplicate chunk.
+			// Extract any new data that extends beyond the overlap.
+			overlap := sr.NextSeq - c.seq
+			if overlap < uint32(len(c.data)) {
+				newData := c.data[overlap:]
+				sr.appendData(newData)
+				sr.NextSeq += uint32(len(newData))
+			}
 		}
-		// c.seq < sr.NextSeq implies overlapping or duplicate chunk, discard it
 	}
 	sr.chunks = keep
 }

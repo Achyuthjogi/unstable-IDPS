@@ -79,7 +79,11 @@ func ParseRule(line string) (*Rule, error) {
 		} else if opt.Key == "nocase" {
 			if lastContent != nil {
 				lastContent.Modifier.Nocase = true
-				lastContent.Pattern = []byte(strings.ToLower(string(lastContent.Pattern)))
+				for i, b := range lastContent.Pattern {
+					if b >= 'A' && b <= 'Z' {
+						lastContent.Pattern[i] = b + 32
+					}
+				}
 			}
 		} else if opt.Key == "offset" {
 			if lastContent != nil {

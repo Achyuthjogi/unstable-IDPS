@@ -22,6 +22,7 @@ type Flow struct {
 	LastSeen     time.Time
 	PacketCount  uint64
 	ByteCount    uint64
+	Mu           sync.Mutex
 
 	// Stream reassembly
 	ClientStream *StreamReassembler
@@ -85,9 +86,8 @@ func (t *Tracker) GetOrCreate(key Key, pktSrcIP [16]byte, pktSrcPort uint16) (*F
 
 // UpdateFlow updates the flow state with a new packet.
 func (t *Tracker) UpdateFlow(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, payload []byte, seq uint32, tcpFlags uint8) {
-	// Not taking lock here assuming Flow is mostly processed by a single goroutine per hash,
-	// or the caller ensures safety. For IDPS packet loop, we will rely on channel sharding
-	// by flow key so a flow is only touched by one worker at a time.
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
 	
 	f.LastSeen = time.Now()
 	f.PacketCount++
@@ -127,7 +127,11 @@ func (t *Tracker) pruneLoop() {
 		now := time.Now()
 		t.mu.Lock()
 		for k, f := range t.flows {
-			if now.Sub(f.LastSeen) > t.idleTimeout || f.State == StateClosed {
+			f.Mu.Lock()
+			lastSeen := f.LastSeen
+			state := f.State
+			f.Mu.Unlock()
+			if now.Sub(lastSeen) > t.idleTimeout || state == StateClosed {
 				delete(t.flows, k)
 			}
 		}

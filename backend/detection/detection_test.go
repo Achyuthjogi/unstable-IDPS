@@ -33,7 +33,7 @@ func TestDetectionLogic(t *testing.T) {
 			DstPort:  dstPort,
 			IsTCPSYN: syn,
 		}
-		AnalyzePacket(st, cfg, fm, pkt)
+		AnalyzePacket(st, cfg, fm, nil, pkt)
 	}
 
 	// SYN Flood Test
