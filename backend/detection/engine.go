@@ -105,17 +105,17 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 	if packet.DstPort == 80 || packet.SrcPort == 80 || packet.DstPort == 8080 {
 		_, _, isAnomaly := e.HTTPInspect.InspectRequest(packet.Payload)
 		if isAnomaly {
-			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "HTTP Protocol Anomaly", "web-application-attack", 2, "NET-HTTP-ANOMALY")
+			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "HTTP Protocol Anomaly", "web-application-attack", 2, "NET-HTTP-ANOMALY", packet.SrcMAC)
 		}
 	} else if packet.DstPort == 22 || packet.SrcPort == 22 {
 		if e.SSHInspect.Inspect(packet.Payload) {
-			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "Deprecated SSH Version Detected", "policy-violation", 3, "NET-SSH-POLICY")
+			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "Deprecated SSH Version Detected", "policy-violation", 3, "NET-SSH-POLICY", packet.SrcMAC)
 		}
 	} else if (packet.DstPort == 53 || packet.SrcPort == 53) && packet.Protocol == "UDP" {
 		dnsLayer := &layers.DNS{}
 		if err := dnsLayer.DecodeFromBytes(packet.Payload, gopacket.NilDecodeFeedback); err == nil {
 			if e.DNSInspect.Inspect(dnsLayer, true) {
-				e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "DNS Protocol Anomaly Detected", "protocol-command-decode", 3, "NET-DNS-ANOMALY")
+				e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "DNS Protocol Anomaly Detected", "protocol-command-decode", 3, "NET-DNS-ANOMALY", packet.SrcMAC)
 			}
 		}
 	}
@@ -149,7 +149,7 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 			ruleID := fmt.Sprintf("SID-%d", r.SID)
 			
 			e.State.Mu.Lock()
-			triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, r.Classtype, severity, "High", packet.SrcIP, packet.DstIP, r.Msg, 1.0)
+			triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, r.Classtype, severity, "High", packet.SrcIP, packet.DstIP, r.Msg, 1.0, packet.SrcMAC)
 			e.State.Mu.Unlock()
 		}
 	}
@@ -210,7 +210,7 @@ func portMatch(rulePort string, pktPort uint16) bool {
 	return false 
 }
 
-func (e *Engine) triggerRuleAlert(srcIP, dstIP, msg, classType string, priority int, ruleID string) {
+func (e *Engine) triggerRuleAlert(srcIP, dstIP, msg, classType string, priority int, ruleID string, srcMAC string) {
 	severity := "Medium"
 	if priority == 1 {
 		severity = "Critical"
@@ -219,6 +219,6 @@ func (e *Engine) triggerRuleAlert(srcIP, dstIP, msg, classType string, priority 
 	}
 
 	e.State.Mu.Lock()
-	triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, classType, severity, "High", srcIP, dstIP, msg, 1.0)
+	triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, classType, severity, "High", srcIP, dstIP, msg, 1.0, srcMAC)
 	e.State.Mu.Unlock()
 }

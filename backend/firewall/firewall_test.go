@@ -33,14 +33,14 @@ func TestFirewallSafetyAndDryRun(t *testing.T) {
 	}
 
 	// Test dry run mode does not error
-	success := fm.BlockIP("8.8.8.8", cfg)
+	success := fm.BlockDevice("8.8.8.8", "", cfg)
 	if !success {
-		t.Errorf("Expected dry run BlockIP to succeed")
+		t.Errorf("Expected dry run BlockDevice to succeed")
 	}
 
-	success = fm.UnblockIP("8.8.8.8", cfg)
+	success = fm.UnblockDevice("8.8.8.8", "", cfg)
 	if !success {
-		t.Errorf("Expected dry run UnblockIP to succeed")
+		t.Errorf("Expected dry run UnblockDevice to succeed")
 	}
 
 	err := fm.SetupGateway(cfg)

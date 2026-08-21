@@ -1,3 +1,16 @@
+// Topology & Layer 2 Isolation Context:
+// This IDPS is designed to run on a gateway node, typically an Ubuntu laptop
+// acting as a NetworkManager hotspot bridge (LAN: wlan0/nm-wlan) with USB tethering (WAN: usb0).
+//
+// IP-based blocking via iptables FORWARD/INPUT chains is insufficient for this topology because:
+// 1. Attackers can renew their DHCP lease to change their IP and bypass the block.
+// 2. Clients connected to the same hotspot bridge can communicate directly at Layer 2,
+//    bypassing the iptables FORWARD chain and evading isolation.
+//
+// To solve this, we use `ebtables` to enforce MAC-based Layer 2 isolation directly
+// on the bridge. This guarantees durable blocking across IP changes and prevents
+// client-to-client attacks on the same hotspot. (ap_isolate via hostapd could also work,
+// but ebtables allows granular, per-device programmatic blocking).
 package firewall
 
 import (
@@ -172,7 +185,16 @@ func (fm *FirewallManager) SetupGateway(cfg *config.Config) error {
 		return fmt.Errorf("failed to configure LAN->WAN forwarding: %v", err)
 	}
 
-	fmt.Println("FirewallManager: Gateway NAT routing configured successfully.")
+	// Setup Layer 2 MAC-based Isolation Chains (ebtables)
+	_ = fm.runCommand(cfg, "sudo", "ebtables", "-N", "IDPS-MAC-BLOCK")
+	_ = fm.runCommand(cfg, "sudo", "ebtables", "-P", "IDPS-MAC-BLOCK", "RETURN") // Default return
+	
+	// Hook custom chain into INPUT (stops gateway access) and FORWARD (stops client-to-client and WAN access)
+	// We ignore errors here in case ebtables isn't installed or already hooked
+	_ = fm.runCommand(cfg, "sudo", "ebtables", "-I", "INPUT", "-j", "IDPS-MAC-BLOCK")
+	_ = fm.runCommand(cfg, "sudo", "ebtables", "-I", "FORWARD", "-j", "IDPS-MAC-BLOCK")
+
+	fmt.Println("FirewallManager: Gateway NAT routing and L2 Isolation configured successfully.")
 	return nil
 }
 
@@ -198,10 +220,16 @@ func (fm *FirewallManager) TeardownGateway(cfg *config.Config) {
 		_ = fm.runCommand(cfg, "sudo", "sysctl", "-w", "net.ipv4.ip_forward=0")
 	}
 
-	fmt.Println("FirewallManager: Gateway NAT routing rules removed.")
+	// Teardown Layer 2 MAC-based Isolation Chains
+	_ = fm.runCommand(cfg, "sudo", "ebtables", "-D", "INPUT", "-j", "IDPS-MAC-BLOCK")
+	_ = fm.runCommand(cfg, "sudo", "ebtables", "-D", "FORWARD", "-j", "IDPS-MAC-BLOCK")
+	_ = fm.runCommand(cfg, "sudo", "ebtables", "-F", "IDPS-MAC-BLOCK")
+	_ = fm.runCommand(cfg, "sudo", "ebtables", "-X", "IDPS-MAC-BLOCK")
+
+	fmt.Println("FirewallManager: Gateway NAT routing and L2 Isolation rules removed.")
 }
 
-func (fm *FirewallManager) BlockIP(ip string, cfg *config.Config) bool {
+func (fm *FirewallManager) BlockDevice(ip string, mac string, cfg *config.Config) bool {
 	cfg.Mu.RLock()
 	mode := cfg.IDPSDeploymentMode
 	cfg.Mu.RUnlock()
@@ -236,10 +264,21 @@ func (fm *FirewallManager) BlockIP(ip string, cfg *config.Config) bool {
 		}
 	}
 
+	// Apply Layer 2 MAC Isolation if MAC is provided
+	if mac != "" {
+		macArgs := []string{"-I", "IDPS-MAC-BLOCK", "-s", mac, "-j", "DROP"}
+		if err := fm.runCommand(cfg, "sudo", append([]string{"ebtables"}, macArgs...)...); err == nil {
+			fmt.Printf("FirewallManager: Added ebtables rule to block MAC %s\n", mac)
+		} else {
+			fmt.Printf("FirewallManager: Failed to block MAC %s via ebtables: %v\n", mac, err)
+			// Don't fail the whole block if ebtables just isn't installed
+		}
+	}
+
 	return success
 }
 
-func (fm *FirewallManager) UnblockIP(ip string, cfg *config.Config) bool {
+func (fm *FirewallManager) UnblockDevice(ip string, mac string, cfg *config.Config) bool {
 	cfg.Mu.RLock()
 	mode := cfg.IDPSDeploymentMode
 	cfg.Mu.RUnlock()
@@ -264,6 +303,14 @@ func (fm *FirewallManager) UnblockIP(ip string, cfg *config.Config) bool {
 		} else {
 			fmt.Printf("FirewallManager: Failed to unblock %s from FORWARD: %v\n", ip, err)
 			success = false
+		}
+	}
+
+	if mac != "" {
+		if err := fm.runCommand(cfg, "sudo", "ebtables", "-D", "IDPS-MAC-BLOCK", "-s", mac, "-j", "DROP"); err == nil {
+			fmt.Printf("FirewallManager: Removed ebtables rule for MAC %s\n", mac)
+		} else {
+			fmt.Printf("FirewallManager: Failed to unblock MAC %s via ebtables: %v\n", mac, err)
 		}
 	}
 

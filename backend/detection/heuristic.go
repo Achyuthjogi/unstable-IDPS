@@ -113,16 +113,41 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 			}
 		}
 		if recentMACs > 100 { // 100 unique MACs in 1 second
-			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-MAC-001", "MAC Flooding", "Critical", "High", srcIP, dstIP, fmt.Sprintf("MAC Flood / CAM Exhaustion (%d MACs/sec)", recentMACs), float64(recentMACs))
+			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-MAC-001", "MAC Flooding", "Critical", "High", srcIP, dstIP, fmt.Sprintf("MAC Flood / CAM Exhaustion (%d MACs/sec)", recentMACs), float64(recentMACs), packet.SrcMAC)
 		}
 		
 		st.Mu.Unlock()
 	}
 
-	// Skip blocked IPs (IPS mode)
+	// Skip blocked IPs/MACs (IPS mode) and handle IP roaming
 	st.Mu.RLock()
 	if secMode == "IPS" {
-		if _, blocked := st.BlockedIPs[srcIP]; blocked {
+		_, ipBlocked := st.BlockedIPs[srcIP]
+		macBlock, macBlocked := st.BlockedMACs[packet.SrcMAC]
+
+		if macBlocked && !ipBlocked && packet.SrcMAC != "" {
+			// Attacker changed IP (e.g. DHCP renew). Re-block immediately!
+			st.Mu.RUnlock()
+			fm.BlockDevice(srcIP, packet.SrcMAC, cfg)
+			
+			st.Mu.Lock()
+			st.BlockedIPs[srcIP] = state.IPBlock{
+				IP:         srcIP,
+				MAC:        packet.SrcMAC,
+				RuleID:     macBlock.RuleID,
+				Reason:     fmt.Sprintf("MAC re-appeared on new IP (original: %s)", macBlock.Reason),
+				Confidence: macBlock.Confidence,
+				CreatedAt:  currentTime,
+				ExpiresAt:  macBlock.ExpiresAt,
+			}
+			st.AddThreatTimeline(state.ThreatTimeline{
+				Timestamp: currentTime,
+				Event:     fmt.Sprintf("Re-blocked MAC %s on new IP %s", packet.SrcMAC, srcIP),
+				Severity:  "Critical",
+			})
+			st.Mu.Unlock()
+			return
+		} else if ipBlocked || macBlocked {
 			st.Mu.RUnlock()
 			return
 		}
@@ -189,7 +214,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 
 		macCount := len(macs)
 		if macCount > 1 {
-			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-ARP-001", "Duplicate IP / ARP Spoofing", "Medium", "High", srcIP, dstIP, fmt.Sprintf("Heuristic ARP Spoofing (%d MACs)", macCount), float64(macCount))
+			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-ARP-001", "Duplicate IP / ARP Spoofing", "Medium", "High", srcIP, dstIP, fmt.Sprintf("Heuristic ARP Spoofing (%d MACs)", macCount), float64(macCount), packet.SrcMAC)
 		}
 
 		// 2. ARP Flood (Storm) Detection
@@ -202,13 +227,13 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 
 		// High rate of ARP packets from a single host (usually > 50/sec is highly anomalous for ARP)
 		if arpRate > 50 {
-			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-ARP-002", "ARP Flood / Storm", "Medium", "High", srcIP, dstIP, fmt.Sprintf("ARP Flood (%d pkts/sec)", arpRate), float64(arpRate))
+			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-ARP-002", "ARP Flood / Storm", "Medium", "High", srcIP, dstIP, fmt.Sprintf("ARP Flood (%d pkts/sec)", arpRate), float64(arpRate), packet.SrcMAC)
 		}
 
 		// 3. Gratuitous ARP Abuse (Many unsolicited replies)
 		// Operation 2 is ARP Reply. If a host is broadcasting replies rapidly, it's likely poisoning.
 		if packet.ARPOperation == 2 && arpRate > 15 {
-			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-ARP-003", "Gratuitous ARP Abuse (Poisoning)", "High", "High", srcIP, dstIP, fmt.Sprintf("ARP Reply Flood (%d pkts/sec)", arpRate), float64(arpRate))
+			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-ARP-003", "Gratuitous ARP Abuse (Poisoning)", "High", "High", srcIP, dstIP, fmt.Sprintf("ARP Reply Flood (%d pkts/sec)", arpRate), float64(arpRate), packet.SrcMAC)
 		}
 	}
 
@@ -233,7 +258,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 				}
 				st.IPPortsAccessed[portKey] = ports
 				if len(ports) > 3 {
-					triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-LAT-001", "Abnormal Lateral Movement", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Lateral Movement Scan (%d internal hosts/min)", len(ports)), float64(len(ports)))
+					triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-LAT-001", "Abnormal Lateral Movement", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Lateral Movement Scan (%d internal hosts/min)", len(ports)), float64(len(ports)), packet.SrcMAC)
 				}
 			}
 		}
@@ -267,7 +292,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 			st.IPSYNTimestamps[srcIP] = synTs
 
 			if synRate > synThresh && uniquePortsRate <= 5 {
-				triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SYN-001", "SYN Flood", "High", "High", srcIP, dstIP, fmt.Sprintf("SYN Flood (%d pkts/s)", synRate), float64(synRate))
+				triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SYN-001", "SYN Flood", "High", "High", srcIP, dstIP, fmt.Sprintf("SYN Flood (%d pkts/s)", synRate), float64(synRate), packet.SrcMAC)
 			}
 
 			// SSH Brute Force
@@ -280,7 +305,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 				st.IPSSHTimestamps[srcIP] = sshTs
 
 				if sshRate > sshThresh {
-					triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SSH-001", "SSH Brute Force", "Critical", "High", srcIP, dstIP, fmt.Sprintf("SSH Brute Force (%d attempts/3s)", sshRate), float64(sshRate))
+					triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SSH-001", "SSH Brute Force", "Critical", "High", srcIP, dstIP, fmt.Sprintf("SSH Brute Force (%d attempts/3s)", sshRate), float64(sshRate), packet.SrcMAC)
 				}
 			}
 		}
@@ -291,7 +316,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 	}
 
 	if uniquePortsRate > portScanThresh {
-		triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SCAN-001", "Port Scan", "High", "High", srcIP, dstIP, fmt.Sprintf("Port Scan (%d ports/3s)", uniquePortsRate), float64(uniquePortsRate))
+		triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SCAN-001", "Port Scan", "High", "High", srcIP, dstIP, fmt.Sprintf("Port Scan (%d ports/3s)", uniquePortsRate), float64(uniquePortsRate), packet.SrcMAC)
 	}
 
 	// UDP Flood
@@ -311,7 +336,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		}
 
 		if udpRate > effectiveThreshold {
-			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-UDP-001", "UDP Flood", "Medium", "High", srcIP, dstIP, fmt.Sprintf("UDP Flood (%d pkts/s)", udpRate), float64(udpRate))
+			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-UDP-001", "UDP Flood", "Medium", "High", srcIP, dstIP, fmt.Sprintf("UDP Flood (%d pkts/s)", udpRate), float64(udpRate), packet.SrcMAC)
 		}
 
 		// DHCP Anomalies
@@ -329,13 +354,13 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 						}
 					}
 					if recentDHCPMACs > 50 { // >50 unique MACs doing DHCP Discover in 10s
-						triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DHCP-001", "DHCP Starvation", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DHCP Starvation (%d unique MACs/10s)", recentDHCPMACs), float64(recentDHCPMACs))
+						triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DHCP-001", "DHCP Starvation", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DHCP Starvation (%d unique MACs/10s)", recentDHCPMACs), float64(recentDHCPMACs), packet.SrcMAC)
 					}
 				}
 			}
 			if packet.IsDHCPOffer {
 				if dhcpIp != "" && srcIP != dhcpIp {
-					triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DHCP-002", "Rogue DHCP Server Detected", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Rogue DHCP Offer from %s", srcIP), 1.0)
+					triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DHCP-002", "Rogue DHCP Server Detected", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Rogue DHCP Offer from %s", srcIP), 1.0, packet.SrcMAC)
 				}
 			}
 		}
@@ -350,7 +375,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 			st.IPDNSReplyTimestamps[srcIP] = udpTs
 
 			if dnsRate > 20 {
-				triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-001", "DNS Amplification", "High", "Medium", srcIP, dstIP, fmt.Sprintf("Heuristic DNS Amplification (%d pkts/s)", dnsRate), float64(dnsRate))
+				triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-001", "DNS Amplification", "High", "Medium", srcIP, dstIP, fmt.Sprintf("Heuristic DNS Amplification (%d pkts/s)", dnsRate), float64(dnsRate), packet.SrcMAC)
 			}
 		}
 		
@@ -370,7 +395,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 								break
 							}
 							if offset+length < len(packet.Payload) && length > 63 {
-								triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-002", "DNS Tunneling", "High", "High", srcIP, dstIP, "Extremely long DNS label detected", 1.0)
+								triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-002", "DNS Tunneling", "High", "High", srcIP, dstIP, "Extremely long DNS label detected", 1.0, packet.SrcMAC)
 								break
 							}
 							offset += length + 1
@@ -379,11 +404,11 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 				} else {
 					// Reply
 					if isInternalIP(srcIP) && srcIP != gatewayIp && gatewayIp != "" {
-						triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-003", "DNS Spoofing", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DNS Reply from unauthorized internal host %s", srcIP), 1.0)
+						triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-003", "DNS Spoofing", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DNS Reply from unauthorized internal host %s", srcIP), 1.0, packet.SrcMAC)
 					}
 					// Simple check for large TXT replies could be added here by parsing the answers, but keeping it simple.
 					if len(packet.Payload) > 1000 {
-						triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-002", "DNS Tunneling", "High", "Medium", srcIP, dstIP, "Unusually large DNS reply payload", 1.0)
+						triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-002", "DNS Tunneling", "High", "Medium", srcIP, dstIP, "Unusually large DNS reply payload", 1.0, packet.SrcMAC)
 					}
 				}
 			}
@@ -400,12 +425,12 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		st.IPICMPTimestamps[srcIP] = icmpTs
 
 		if icmpRate > cfg.ICMPFloodThreshold {
-			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-ICMP-001", "ICMP Flood", "Medium", "High", srcIP, dstIP, fmt.Sprintf("ICMP Flood (%d pkts/s)", icmpRate), float64(icmpRate))
+			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-ICMP-001", "ICMP Flood", "Medium", "High", srcIP, dstIP, fmt.Sprintf("ICMP Flood (%d pkts/s)", icmpRate), float64(icmpRate), packet.SrcMAC)
 		}
 
 		// Ping of Death
 		if len(packet.Payload) > 1000 {
-			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-POD-001", "Ping of Death", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Oversized ICMP (%d bytes)", len(packet.Payload)), 1.0)
+			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-POD-001", "Ping of Death", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Oversized ICMP (%d bytes)", len(packet.Payload)), 1.0, packet.SrcMAC)
 		}
 
 		// ICMP Sweep
@@ -421,20 +446,20 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		}
 		st.IPICMPSweep[srcIP] = sweepMap
 		if len(sweepMap) > 10 { // Ping sweep to >10 hosts in 10s
-			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SWEEP-001", "ICMP Sweep", "Medium", "High", srcIP, dstIP, fmt.Sprintf("ICMP Sweep (%d hosts/10s)", len(sweepMap)), float64(len(sweepMap)))
+			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SWEEP-001", "ICMP Sweep", "Medium", "High", srcIP, dstIP, fmt.Sprintf("ICMP Sweep (%d hosts/10s)", len(sweepMap)), float64(len(sweepMap)), packet.SrcMAC)
 		}
 	}
 
 	// DoS Generic Flood
 	if packetRate > susRate && !isPortScan {
-		triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DOS-001", "DoS Attack", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DoS Attack (%d pkts/s)", packetRate), float64(packetRate))
+		triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DOS-001", "DoS Attack", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DoS Attack (%d pkts/s)", packetRate), float64(packetRate), packet.SrcMAC)
 	}
 
 	st.Mu.Unlock()
 }
 
 // Ensure st.Mu is Locked before calling triggerAlert
-func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, alertLogger *alert.Logger, currentTime float64, ruleID, alertType, severity, confidence, srcIP, dstIP, reason string, rate float64) {
+func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, alertLogger *alert.Logger, currentTime float64, ruleID, alertType, severity, confidence, srcIP, dstIP, reason string, rate float64, srcMAC string) {
 	throttleKey := srcIP + "_" + ruleID
 	if lastAlert, ok := st.LastAlertTimes[throttleKey]; ok {
 		if currentTime-lastAlert < 30.0 {
@@ -474,7 +499,7 @@ func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 
 			// Drop the lock to perform potentially slow firewall operation
 			st.Mu.Unlock()
-			blockSuccess := fm.BlockIP(srcIP, cfg)
+			blockSuccess := fm.BlockDevice(srcIP, srcMAC, cfg)
 			st.Mu.Lock()
 
 			if blockSuccess {
@@ -483,13 +508,19 @@ func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 				expiresAt := currentTime + float64(ttl)
 				alert.ExpiresAt = expiresAt
 
-				st.BlockedIPs[srcIP] = state.IPBlock{
+				ipBlock := state.IPBlock{
 					IP:         srcIP,
+					MAC:        srcMAC,
 					RuleID:     ruleID,
 					Reason:     reason,
 					Confidence: confidence,
 					CreatedAt:  currentTime,
 					ExpiresAt:  expiresAt,
+				}
+
+				st.BlockedIPs[srcIP] = ipBlock
+				if srcMAC != "" {
+					st.BlockedMACs[srcMAC] = ipBlock
 				}
 
 				st.AddThreatTimeline(state.ThreatTimeline{

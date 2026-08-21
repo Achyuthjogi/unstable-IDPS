@@ -222,21 +222,39 @@ func blockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string) {
 		return
 	}
 
-	if api.Firewall.BlockIP(ip, api.Config) {
+	api.St.Mu.RLock()
+	mac := ""
+	for _, d := range api.St.Devices {
+		if d.IP == ip {
+			mac = d.MAC
+			break
+		}
+	}
+	api.St.Mu.RUnlock()
+
+	if api.Firewall.BlockDevice(ip, mac, api.Config) {
 		now := float64(time.Now().UnixNano()) / 1e9
 		expiresAt := now + float64(api.Config.BlockTTLSeconds)
-		api.St.Mu.Lock()
-		api.St.BlockedIPs[ip] = state.IPBlock{
+		
+		ipBlock := state.IPBlock{
 			IP:         ip,
+			MAC:        mac,
 			RuleID:     "MANUAL",
 			Reason:     "Manually blocked via API",
 			Confidence: "N/A",
 			CreatedAt:  now,
 			ExpiresAt:  expiresAt,
 		}
+
+		api.St.Mu.Lock()
+		api.St.BlockedIPs[ip] = ipBlock
+		if mac != "" {
+			api.St.BlockedMACs[mac] = ipBlock
+		}
+		
 		api.St.AddThreatTimeline(state.ThreatTimeline{
 			Timestamp: now,
-			Event:     fmt.Sprintf("Manually blocked IP %s via API", ip),
+			Event:     fmt.Sprintf("Manually blocked IP %s (MAC: %s) via API", ip, mac),
 			Severity:  "Critical",
 		})
 		api.St.Mu.Unlock()
@@ -254,9 +272,20 @@ func unblockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string)
 		return
 	}
 
-	if api.Firewall.UnblockIP(ip, api.Config) {
+	api.St.Mu.RLock()
+	block, exists := api.St.BlockedIPs[ip]
+	mac := ""
+	if exists {
+		mac = block.MAC
+	}
+	api.St.Mu.RUnlock()
+
+	if api.Firewall.UnblockDevice(ip, mac, api.Config) {
 		api.St.Mu.Lock()
 		delete(api.St.BlockedIPs, ip)
+		if mac != "" {
+			delete(api.St.BlockedMACs, mac)
+		}
 		api.St.AddThreatTimeline(state.ThreatTimeline{
 			Timestamp: float64(time.Now().UnixNano()) / 1e9,
 			Event:     fmt.Sprintf("Manually unblocked IP %s via API", ip),

@@ -32,6 +32,7 @@ type Alert struct {
 
 type IPBlock struct {
 	IP         string  `json:"ip"`
+	MAC        string  `json:"mac"`
 	RuleID     string  `json:"rule_id"`
 	Reason     string  `json:"reason"`
 	Confidence string  `json:"confidence"`
@@ -56,6 +57,7 @@ type AppState struct {
 	Mu sync.RWMutex
 
 	BlockedIPs         map[string]IPBlock
+	BlockedMACs        map[string]IPBlock
 	Devices            map[string]*Device
 	Alerts             []Alert
 	PacketCount        int
@@ -96,6 +98,7 @@ type AppState struct {
 func NewAppState() *AppState {
 	st := &AppState{
 		BlockedIPs:         make(map[string]IPBlock),
+		BlockedMACs:        make(map[string]IPBlock),
 		Devices:            make(map[string]*Device),
 		Alerts:             make([]Alert, 0, 1000),
 		ThreatTimeline:     make([]ThreatTimeline, 0, 500),
@@ -218,6 +221,18 @@ func (s *AppState) cleanupLoop() {
 		for key, t := range s.LastAlertTimes {
 			if now-t > 300.0 {
 				delete(s.LastAlertTimes, key)
+			}
+		}
+
+		// Clean up expired IP and MAC blocks manually if needed (though usually done by TTL, we can passively expire here)
+		for ip, b := range s.BlockedIPs {
+			if b.ExpiresAt > 0 && now > b.ExpiresAt {
+				delete(s.BlockedIPs, ip)
+			}
+		}
+		for mac, b := range s.BlockedMACs {
+			if b.ExpiresAt > 0 && now > b.ExpiresAt {
+				delete(s.BlockedMACs, mac)
 			}
 		}
 

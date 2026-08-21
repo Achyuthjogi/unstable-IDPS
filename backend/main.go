@@ -90,10 +90,12 @@ func main() {
 				appState.Mu.Lock()
 				now := float64(time.Now().UnixNano()) / 1e9
 				var expiredIPs []string
+				var expiredMACs []string
 				var expiredRules []string
 				for ip, block := range appState.BlockedIPs {
 					if block.ExpiresAt > 0 && block.ExpiresAt <= now {
 						expiredIPs = append(expiredIPs, ip)
+						expiredMACs = append(expiredMACs, block.MAC)
 						expiredRules = append(expiredRules, block.RuleID)
 					}
 				}
@@ -101,9 +103,13 @@ func main() {
 
 				// Unblock without holding the lock
 				for i, ip := range expiredIPs {
-					if fwManager.UnblockIP(ip, cfg) {
+					mac := expiredMACs[i]
+					if fwManager.UnblockDevice(ip, mac, cfg) {
 						appState.Mu.Lock()
 						delete(appState.BlockedIPs, ip)
+						if mac != "" {
+							delete(appState.BlockedMACs, mac)
+						}
 						appState.AddThreatTimeline(state.ThreatTimeline{
 							Timestamp: now,
 							Event:     fmt.Sprintf("Auto-unblocked IP %s (Rule: %s expired)", ip, expiredRules[i]),
