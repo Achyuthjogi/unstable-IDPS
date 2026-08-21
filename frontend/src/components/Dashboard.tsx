@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 import { Activity, AlertOctagon, ShieldAlert, Cpu, Network, ArrowUpRight, Ban, X, Monitor, Maximize, Search, Filter } from 'lucide-react';
@@ -16,7 +16,7 @@ const API_BASE = `http://${API_HOST}:8000`;
   const [showLiveTrafficModal, setShowLiveTrafficModal] = useState(false);
   const [filterIP, setFilterIP] = useState<string>('');
 
-  useMemo(() => {
+  useEffect(() => {
     if (data?.network?.packet_count !== undefined) {
       setPacketHistory(prev => {
         const newHist = [...prev, { time: new Date().toLocaleTimeString(), packets: data.network.packet_count }];
@@ -24,7 +24,7 @@ const API_BASE = `http://${API_HOST}:8000`;
         return newHist;
       });
     }
-  }, [data?.network?.packet_count]);
+  }, [data]);
 
   const mergedIPs = useMemo(() => {
     if (!data) return [];
@@ -193,7 +193,7 @@ const API_BASE = `http://${API_HOST}:8000`;
               <ArrowUpRight className="w-5 h-5 text-rose-500" /> All Source IPs
             </h3>
           </div>
-          <div className="flex-1 overflow-y-auto pr-2 space-y-3">
+          <div className="flex-1 overflow-y-auto pr-2 space-y-3 max-h-[300px] custom-scrollbar">
             {mergedIPs.map((ip: any, i: number) => (
               <div key={i} className="flex items-center gap-4 p-3 rounded-xl kinetic-card transition-all">
                 <div className="px-3 py-1.5 rounded-lg bg-primary/10 flex items-center justify-center text-xs font-bold text-primary min-w-[80px]">

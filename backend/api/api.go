@@ -113,20 +113,24 @@ func CreateRouter(apiState *ApiState) http.Handler {
 
 func getStatus(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	api.St.Mu.RLock()
-	defer api.St.Mu.RUnlock()
+	packetCount := api.St.PacketCount
+	activeConns := api.St.ActiveConnections
+	api.St.Mu.RUnlock()
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":             "running",
-		"packet_count":       api.St.PacketCount,
-		"active_connections": api.St.ActiveConnections,
+		"packet_count":       packetCount,
+		"active_connections": activeConns,
 	})
 }
 
 func getAlerts(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	api.St.Mu.RLock()
-	defer api.St.Mu.RUnlock()
+	alerts := make([]state.Alert, len(api.St.Alerts))
+	copy(alerts, api.St.Alerts)
+	api.St.Mu.RUnlock()
 
-	json.NewEncoder(w).Encode(api.St.Alerts)
+	json.NewEncoder(w).Encode(alerts)
 }
 
 func dismissAlert(w http.ResponseWriter, r *http.Request, api *ApiState, id string) {
@@ -152,12 +156,11 @@ func dismissAlert(w http.ResponseWriter, r *http.Request, api *ApiState, id stri
 
 func getBlocked(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	api.St.Mu.RLock()
-	defer api.St.Mu.RUnlock()
-
 	var blocked []state.IPBlock
 	for _, b := range api.St.BlockedIPs {
 		blocked = append(blocked, b)
 	}
+	api.St.Mu.RUnlock()
 	json.NewEncoder(w).Encode(blocked)
 }
 
@@ -180,6 +183,11 @@ func blockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string) {
 			CreatedAt:  now,
 			ExpiresAt:  expiresAt,
 		}
+		api.St.AddThreatTimeline(state.ThreatTimeline{
+			Timestamp: now,
+			Event:     fmt.Sprintf("Manually blocked IP %s via API", ip),
+			Severity:  "Critical",
+		})
 		api.St.Mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": fmt.Sprintf("IP %s blocked", ip)})
 	} else {
@@ -198,6 +206,11 @@ func unblockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string)
 	if api.Firewall.UnblockIP(ip, api.Config) {
 		api.St.Mu.Lock()
 		delete(api.St.BlockedIPs, ip)
+		api.St.AddThreatTimeline(state.ThreatTimeline{
+			Timestamp: float64(time.Now().UnixNano()) / 1e9,
+			Event:     fmt.Sprintf("Manually unblocked IP %s via API", ip),
+			Severity:  "Info",
+		})
 		api.St.Mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": fmt.Sprintf("IP %s unblocked", ip)})
 	} else {
@@ -370,15 +383,16 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 
 		// Timeline (last 20 reversed)
 		var timeline []map[string]interface{}
-		timelineStart := alertsCount - 20
+		timelineCount := len(api.St.ThreatTimeline)
+		timelineStart := timelineCount - 20
 		if timelineStart < 0 {
 			timelineStart = 0
 		}
-		for i := alertsCount - 1; i >= timelineStart; i-- {
-			a := api.St.Alerts[i]
+		for i := timelineCount - 1; i >= timelineStart; i-- {
+			a := api.St.ThreatTimeline[i]
 			timeline = append(timeline, map[string]interface{}{
 				"timestamp": a.Timestamp,
-				"event":     a.AlertType,
+				"event":     a.Event,
 				"severity":  a.Severity,
 			})
 		}

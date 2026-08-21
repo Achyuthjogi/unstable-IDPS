@@ -62,19 +62,13 @@ function KineticNetwork() {
     <group>
       <points ref={pointsRef}>
         <bufferGeometry>
-          {/* @ts-expect-error - args is not required in our usage */}
           <bufferAttribute
             attach="attributes-position"
-            count={particleCount}
-            array={positions}
-            itemSize={3}
+            args={[positions, 3]}
           />
-          {/* @ts-expect-error - args is not required in our usage */}
           <bufferAttribute
             attach="attributes-color"
-            count={particleCount}
-            array={colors}
-            itemSize={3}
+            args={[colors, 3]}
           />
         </bufferGeometry>
         <pointsMaterial size={0.05} vertexColors transparent opacity={0.8} />
@@ -82,12 +76,9 @@ function KineticNetwork() {
       
       <lineSegments ref={linesRef}>
         <bufferGeometry>
-          {/* @ts-expect-error - args is not required in our usage */}
           <bufferAttribute
             attach="attributes-position"
-            count={linePositions.length / 3}
-            array={linePositions}
-            itemSize={3}
+            args={[linePositions, 3]}
           />
         </bufferGeometry>
         <lineBasicMaterial color="#00ffcc" transparent opacity={0.15} />
