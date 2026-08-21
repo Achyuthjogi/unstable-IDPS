@@ -1,6 +1,9 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"net"
 	"os"
 	"runtime"
@@ -72,7 +75,7 @@ func Load() *Config {
 
 	autoWan, autoLan := DiscoverInterfaces()
 
-	originsStr := getEnv("ALLOWED_ORIGINS", "*")
+	originsStr := getEnv("ALLOWED_ORIGINS", "")
 	var origins []string
 	if originsStr != "" {
 		for _, o := range strings.Split(originsStr, ",") {
@@ -80,8 +83,18 @@ func Load() *Config {
 		}
 	}
 
+	apiKey := getEnv("API_KEY", "")
+	if apiKey == "" {
+		keyBytes := make([]byte, 32)
+		if _, err := rand.Read(keyBytes); err != nil {
+			panic(fmt.Sprintf("Failed to generate secure API key: %v", err))
+		}
+		apiKey = hex.EncodeToString(keyBytes)
+		fmt.Printf("Generated API key: %s — set API_KEY to persist this across restarts\n", apiKey)
+	}
+
 	cfg := &Config{
-		APIKey:                  getEnv("API_KEY", ""),
+		APIKey:                  apiKey,
 		AllowedOrigins:          origins,
 		IDPSDeploymentMode:      getEnv("IDPS_DEPLOYMENT_MODE", "HOST"), // HOST or NETWORK
 		IDPSSecurityMode:        getEnv("IDPS_SECURITY_MODE", "IDS"),    // IDS or IPS
@@ -138,4 +151,35 @@ func getEnvBool(key string, defaultVal bool) bool {
 		}
 	}
 	return defaultVal
+}
+
+func (c *Config) Clone() *Config {
+	c.Mu.RLock()
+	defer c.Mu.RUnlock()
+	return &Config{
+		APIKey:                  c.APIKey,
+		AllowedOrigins:          c.AllowedOrigins,
+		IDPSDeploymentMode:      c.IDPSDeploymentMode,
+		IDPSSecurityMode:        c.IDPSSecurityMode,
+		WanInterface:            c.WanInterface,
+		LanInterface:            c.LanInterface,
+		CaptureInterface:        c.CaptureInterface,
+		Interface:               c.Interface,
+		ApiHost:                 c.ApiHost,
+		FirewallDryRun:          c.FirewallDryRun,
+		SuspiciousRateThreshold: c.SuspiciousRateThreshold,
+		PortScanThreshold:       c.PortScanThreshold,
+		ICMPFloodThreshold:      c.ICMPFloodThreshold,
+		UDPFloodThreshold:       c.UDPFloodThreshold,
+		SYNFloodThreshold:       c.SYNFloodThreshold,
+		SSHBruteForceThreshold:  c.SSHBruteForceThreshold,
+		BlockTTLSeconds:         c.BlockTTLSeconds,
+		GatewayIP:               c.GatewayIP,
+		WorkerCount:             c.WorkerCount,
+		LegitimateDHCPServerIP:  c.LegitimateDHCPServerIP,
+		RulesPath:               c.RulesPath,
+		AlertLogPath:            c.AlertLogPath,
+		MaxFlows:                c.MaxFlows,
+		MaxReassembly:           c.MaxReassembly,
+	}
 }
