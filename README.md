@@ -1,8 +1,9 @@
-# Real-Time Intrusion Detection and Prevention System (IDPS)
+# Nexus IDPS: Real-Time Intrusion Detection and Prevention System
 
 ![IDPS Dashboard Mockup](https://via.placeholder.com/1200x600.png?text=Nexus+IDPS+Dashboard)
 
-Nexus IDPS is a professional, production-quality Intrusion Detection and Prevention System built for real-time network security monitoring and automated mitigation. It uses a custom rule-based detection engine powered by gopacket (Go) and a highly responsive, modern SOC-style dashboard built with React and Tailwind CSS.
+## Abstract
+The increasing frequency of network attacks requires robust, real-time threat identification and mitigation. Traditional systems often suffer from high resource consumption, complex configurations, and delayed responses. Nexus IDPS is a lightweight, high-performance Intrusion Detection and Prevention System built for real-time monitoring and automated defense. It utilizes a custom Go-based detection engine powered by `gopacket` for raw packet inspection. Threats are mitigated autonomously by dynamically updating host or gateway `iptables` firewalls. The project includes a modern, responsive Security Operations Center (SOC) dashboard built with React, connecting via WebSockets to provide instantaneous, in-memory state updates without traditional database overhead.
 
 ## 🌟 Features
 

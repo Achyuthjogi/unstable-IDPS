@@ -8,6 +8,7 @@ frontend/dist/
 frontend/dist-ssr/
 frontend/.npm/
 frontend/*.local
+frontend/coverage/
 
 # Go (Backend)
 backend/idps-backend
@@ -19,11 +20,22 @@ backend/idps-backend
 *.test
 *.out
 *_test.go
+backend/coverage.out
+
+# Python
+__pycache__/
+*.pyc
+
 # IDEs and OS
 .vscode/
 .idea/
 .DS_Store
+*.swp
+*~
 
 # Logs
 *.log
 backend/alerts.json
+
+# Project specific
+abstract.md
