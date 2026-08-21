@@ -27,9 +27,9 @@ def send_udp(port, payload):
         pass
 
 def print_step(step, name):
-    print(f"[{step}/20] {name}")
+    print(f"[{step}/22] {name}")
 
-print("Starting 20-Danger Simulation for IDPS...")
+print("Starting 22-Danger Simulation for IDPS...")
 time.sleep(1)
 
 # 1. SQL Injection (UNION SELECT)
@@ -156,6 +156,17 @@ time.sleep(0.5)
 print_step(20, "Large Payload Transfer")
 send_tcp(80, b"A" * 65000)
 time.sleep(2)
+
+# 21. Man-in-the-Middle (MITM) / SSL Stripping
+print_step(21, "MITM / SSL Stripping (Cleartext Password)")
+send_tcp(80, b"POST /login HTTP/1.1\r\nHost: localhost\r\n\r\nusername=admin&password=secret")
+time.sleep(0.5)
+
+# 22. Malware / Command-and-Control (C2)
+print_step(22, "Malware / Command-and-Control (C2)")
+send_tcp(80, b"GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: Mozilla/4.0 (compatible; MSIE 6.1; Windows NT)\r\n\r\n")
+time.sleep(0.5)
+
 
 print("\nSimulation Finished. Fetching results from IDPS Backend...")
 time.sleep(2)

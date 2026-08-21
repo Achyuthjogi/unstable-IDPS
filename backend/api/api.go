@@ -23,7 +23,48 @@ type ApiState struct {
 	St       *state.AppState
 	Config   *config.Config
 	Firewall *firewall.FirewallManager
-	Reload   func(oldConfig *config.Config)
+	Reload   func(oldConfig *config.Config) error
+}
+
+func authMiddleware(apiState *ApiState, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiState.Config.Mu.RLock()
+		expectedKey := apiState.Config.APIKey
+		apiState.Config.Mu.RUnlock()
+
+		if expectedKey == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		key := r.Header.Get("X-API-Key")
+		if key == "" {
+			key = r.Header.Get("Authorization")
+			key = strings.TrimPrefix(key, "Bearer ")
+		}
+		if key == "" {
+			// For WebSockets, check protocols or query params
+			if r.URL.Path == "/ws" {
+				protocols := r.Header.Get("Sec-WebSocket-Protocol")
+				for _, p := range strings.Split(protocols, ",") {
+					if strings.TrimSpace(p) == expectedKey {
+						key = expectedKey // Match found in subprotocol
+						break
+					}
+				}
+				if key == "" {
+					key = r.URL.Query().Get("api_key")
+				}
+			}
+		}
+
+		if key != expectedKey {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func CreateRouter(apiState *ApiState) http.Handler {
@@ -102,13 +143,17 @@ func CreateRouter(apiState *ApiState) http.Handler {
 		wsHandler(w, r, apiState)
 	})
 
+	apiState.Config.Mu.RLock()
+	allowedOrigins := apiState.Config.AllowedOrigins
+	apiState.Config.Mu.RUnlock()
+
 	c := cors.New(cors.Options{
-		AllowedOrigins: []string{"*"},
+		AllowedOrigins: allowedOrigins,
 		AllowedMethods: []string{"GET", "POST", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{"*"},
 	})
 
-	return c.Handler(mux)
+	return c.Handler(authMiddleware(apiState, mux))
 }
 
 func getStatus(w http.ResponseWriter, r *http.Request, api *ApiState) {
@@ -220,6 +265,8 @@ func unblockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string)
 }
 
 func getSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	api.Config.Mu.RLock()
+	defer api.Config.Mu.RUnlock()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"IDPS_DEPLOYMENT_MODE": api.Config.IDPSDeploymentMode,
 		"IDPS_SECURITY_MODE":   api.Config.IDPSSecurityMode,
@@ -236,10 +283,12 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		return
 	}
 	
+	api.Config.Mu.Lock()
 	oldConfig := *api.Config
 
 	if val, ok := body["IDPS_DEPLOYMENT_MODE"]; ok {
 		if val != "HOST" && val != "NETWORK" && val != "GATEWAY" {
+			api.Config.Mu.Unlock()
 			http.Error(w, "Invalid deployment mode", http.StatusBadRequest)
 			return
 		}
@@ -247,6 +296,7 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	}
 	if val, ok := body["IDPS_SECURITY_MODE"]; ok {
 		if val != "IDS" && val != "IPS" {
+			api.Config.Mu.Unlock()
 			http.Error(w, "Invalid security mode", http.StatusBadRequest)
 			return
 		}
@@ -268,10 +318,47 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		api.Config.CaptureInterface = api.Config.Interface
 	}
 
+	// Validate interfaces before applying
+	if api.Config.IDPSDeploymentMode == "GATEWAY" || api.Config.IDPSDeploymentMode == "NETWORK" {
+		if _, err := net.InterfaceByName(api.Config.WanInterface); err != nil {
+			*api.Config = oldConfig
+			api.Config.Mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "WAN interface not found"})
+			return
+		}
+		if _, err := net.InterfaceByName(api.Config.LanInterface); err != nil {
+			*api.Config = oldConfig
+			api.Config.Mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "LAN interface not found"})
+			return
+		}
+	} else {
+		if _, err := net.InterfaceByName(api.Config.Interface); err != nil {
+			*api.Config = oldConfig
+			api.Config.Mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "Monitoring interface not found"})
+			return
+		}
+	}
+	
+	api.Config.Mu.Unlock()
+
 	// Trigger hot-reload in main
 	if api.Reload != nil {
 		oldCfg := oldConfig // Create a local copy to take pointer
-		api.Reload(&oldCfg)
+		if err := api.Reload(&oldCfg); err != nil {
+			// Rollback config
+			api.Config.Mu.Lock()
+			*api.Config = oldConfig
+			api.Config.Mu.Unlock()
+			
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": fmt.Sprintf("Reload failed: %v", err)})
+			return
+		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Configuration applied successfully."})
@@ -291,11 +378,27 @@ func getInterfaces(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	json.NewEncoder(w).Encode(names)
 }
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
 func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	api.Config.Mu.RLock()
+	allowedOrigins := api.Config.AllowedOrigins
+	api.Config.Mu.RUnlock()
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			for _, o := range allowedOrigins {
+				if o == "*" || o == origin {
+					return true
+				}
+			}
+			return false
+		},
+		Subprotocols: []string{api.Config.APIKey}, // Allow the API key as a subprotocol
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		fmt.Println("WebSocket upgrade error:", err)

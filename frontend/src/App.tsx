@@ -8,8 +8,9 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { format } from 'date-fns';
 
 const API_HOST = window.location.hostname;
-const API_BASE = `http://${API_HOST}:8000`;
-const WS_URL = `ws://${API_HOST}:8000/ws`;
+const API_BASE = `https://${API_HOST}:8000`;
+const WS_URL = `wss://${API_HOST}:8000/ws`;
+const API_KEY = import.meta.env.VITE_API_KEY || '';
 
 // Error boundary to catch 3D/WebGL crashes
 class SafeBackground extends Component<{children: ReactNode}, {hasError: boolean}> {
@@ -33,7 +34,7 @@ class SafeBackground extends Component<{children: ReactNode}, {hasError: boolean
 
 function App() {
   const [activeTab, setActiveTab] = useState(window.location.pathname.replace('/', '') || 'overview');
-  const { data, status } = useWebSocket(WS_URL);
+  const { data, status } = useWebSocket(WS_URL, API_KEY ? [API_KEY] : undefined);
 
   return (
     <Router>
@@ -89,7 +90,10 @@ function AlertsView({ data }: { data: any }) {
 
   const handleBlock = async (ip: string) => {
     try {
-      await fetch(`${API_BASE}/api/block/${ip}`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/block/${ip}`, { 
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY }
+      });
     } catch (e) {
       console.error(e);
     }
@@ -97,7 +101,10 @@ function AlertsView({ data }: { data: any }) {
 
   const handleDismiss = async (id: string) => {
     try {
-      await fetch(`${API_BASE}/api/alerts/${id}`, { method: 'DELETE' });
+      await fetch(`${API_BASE}/api/alerts/${id}`, { 
+        method: 'DELETE',
+        headers: { 'X-API-Key': API_KEY }
+      });
     } catch (e) {
       console.error(e);
     }
@@ -166,7 +173,10 @@ function BlockedIPsView({ data }: { data: any }) {
 
   const handleUnblock = async (ip: string) => {
     try {
-      await fetch(`${API_BASE}/api/unblock/${ip}`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/unblock/${ip}`, { 
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY }
+      });
     } catch (e) {
       console.error(e);
     }
@@ -222,7 +232,7 @@ function SettingsView() {
 
   // Fetch current settings on mount
   useEffect(() => {
-    fetch(`${API_BASE}/api/settings`)
+    fetch(`${API_BASE}/api/settings`, { headers: { 'X-API-Key': API_KEY } })
       .then(res => res.json())
       .then(data => {
         setSettings({
@@ -235,7 +245,7 @@ function SettingsView() {
       })
       .catch(console.error);
 
-    fetch(`${API_BASE}/api/interfaces`)
+    fetch(`${API_BASE}/api/interfaces`, { headers: { 'X-API-Key': API_KEY } })
       .then(res => res.json())
       .then(data => setInterfaces(data))
       .catch(console.error);
@@ -247,7 +257,10 @@ function SettingsView() {
     try {
       const res = await fetch(`${API_BASE}/api/settings`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'X-API-Key': API_KEY 
+        },
         body: JSON.stringify(settings)
       });
       const data = await res.json();

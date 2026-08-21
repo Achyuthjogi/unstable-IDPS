@@ -8,8 +8,9 @@ export default function DiagnosticsView() {
 
   useEffect(() => {
     const API_HOST = window.location.hostname;
-    const API_BASE = `http://${API_HOST}:8000`;
-    fetch(`${API_BASE}/api/system/network-check`)
+    const API_BASE = `https://${API_HOST}:8000`;
+    const API_KEY = import.meta.env.VITE_API_KEY || '';
+    fetch(`${API_BASE}/api/system/network-check`, { headers: { 'X-API-Key': API_KEY } })
       .then(res => res.json())
       .then(data => {
         setData(data);

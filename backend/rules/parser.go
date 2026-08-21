@@ -132,7 +132,25 @@ type option struct {
 // A real parser would handle escaped semicolons and quotes properly.
 func parseOptions(bodyStr string) []option {
 	var opts []option
-	parts := strings.Split(bodyStr, ";")
+	
+	// Custom split to handle escaped semicolons (\;)
+	var parts []string
+	var current strings.Builder
+	for i := 0; i < len(bodyStr); i++ {
+		if bodyStr[i] == '\\' && i+1 < len(bodyStr) && bodyStr[i+1] == ';' {
+			current.WriteByte(';')
+			i++ // skip the escaped semicolon
+		} else if bodyStr[i] == ';' {
+			parts = append(parts, current.String())
+			current.Reset()
+		} else {
+			current.WriteByte(bodyStr[i])
+		}
+	}
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if p == "" {

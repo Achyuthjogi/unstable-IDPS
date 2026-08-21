@@ -123,26 +123,28 @@ func main() {
 		Firewall: fwManager,
 	}
 	
-	apiState.Reload = func(oldConfig *config.Config) {
+	apiState.Reload = func(oldConfig *config.Config) error {
 		fmt.Println("Reloading configuration and services...")
 		if stopCapture != nil {
 			stopCapture()
 		}
-		
-		// Note: We removed automatic godotenv.Write here per requirements to prevent unexpected overwrites.
 
 		// Re-setup firewall using oldConfig to teardown correctly
 		fwManager.TeardownGateway(oldConfig)
 		err := fwManager.SetupGateway(cfg)
 		if err != nil {
 			fmt.Printf("Gateway reload FAILED: %v\n", err)
+			return err
 		}
 		
 		// Restart capture on new interface
 		stopCapture, err = capture.StartCapture(appState, cfg, fwManager, detEngine)
 		if err != nil {
 			fmt.Printf("Capture reload FAILED: %v\n", err)
+			return err
 		}
+		
+		return nil
 	}
 
 	router := api.CreateRouter(apiState)

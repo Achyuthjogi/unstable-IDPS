@@ -14,6 +14,9 @@ import (
 	"idps-backend/inspect"
 	"idps-backend/rules"
 	"idps-backend/state"
+	
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 )
 
 // Engine is the central detection coordinator.
@@ -108,6 +111,13 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 		if e.SSHInspect.Inspect(packet.Payload) {
 			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "Deprecated SSH Version Detected", "policy-violation", 3, "NET-SSH-POLICY")
 		}
+	} else if (packet.DstPort == 53 || packet.SrcPort == 53) && packet.Protocol == "UDP" {
+		dnsLayer := &layers.DNS{}
+		if err := dnsLayer.DecodeFromBytes(packet.Payload, gopacket.NilDecodeFeedback); err == nil {
+			if e.DNSInspect.Inspect(dnsLayer, true) {
+				e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "DNS Protocol Anomaly Detected", "protocol-command-decode", 3, "NET-DNS-ANOMALY")
+			}
+		}
 	}
 
 	// 4. Rule Evaluation (on reassembled stream)
@@ -195,7 +205,9 @@ func portMatch(rulePort string, pktPort uint16) bool {
 		return pktPort == uint16(p)
 	}
 	// Need variable expansion like $HTTP_PORTS here in a real implementation.
-	return true 
+	// For now, unsupported specifications are treated as fail-closed.
+	fmt.Printf("Warning: Unsupported port specification '%s' evaluated as fail-closed\n", rulePort)
+	return false 
 }
 
 func (e *Engine) triggerRuleAlert(srcIP, dstIP, msg, classType string, priority int, ruleID string) {

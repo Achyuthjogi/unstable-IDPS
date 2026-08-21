@@ -18,3 +18,9 @@ alert tcp $HOME_NET 23 -> $EXTERNAL_NET any (msg:"Telnet Authentication Failure"
 # SMB/Windows Service Scanning (Probing 139/445)
 alert tcp $EXTERNAL_NET any -> $HOME_NET 139 (msg:"SMB/NetBIOS Scan Detected"; flow:stateless; flags:S; classtype:attempted-recon; sid:1000401; rev:1; priority:3;)
 alert tcp $EXTERNAL_NET any -> $HOME_NET 445 (msg:"SMB/Windows Service Scan Detected"; flow:stateless; flags:S; classtype:attempted-recon; sid:1000402; rev:1; priority:3;)
+
+# Man-in-the-Middle (MITM) / SSL Stripping
+alert tcp $HOME_NET any -> $EXTERNAL_NET $HTTP_PORTS (msg:"Possible MITM / SSL Stripping (Cleartext Password)"; flow:established,to_server; content:"password="; nocase; classtype:policy-violation; sid:1000601; rev:1; priority:2;)
+
+# Malware / Command-and-Control (C2) Traffic
+alert tcp $HOME_NET any -> $EXTERNAL_NET $HTTP_PORTS (msg:"Malware/Command-and-Control (C2) Traffic Detected (Meterpreter)"; flow:established,to_server; content:"User-Agent: Mozilla/4.0 (compatible; MSIE 6.1; Windows NT)"; classtype:trojan-activity; sid:1000501; rev:1; priority:1;)

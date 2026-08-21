@@ -6,11 +6,16 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
+	Mu sync.RWMutex
+	
+	APIKey                  string
+	AllowedOrigins          []string
 	IDPSDeploymentMode      string
 	IDPSSecurityMode        string
 	WanInterface            string
@@ -67,7 +72,17 @@ func Load() *Config {
 
 	autoWan, autoLan := DiscoverInterfaces()
 
+	originsStr := getEnv("ALLOWED_ORIGINS", "*")
+	var origins []string
+	if originsStr != "" {
+		for _, o := range strings.Split(originsStr, ",") {
+			origins = append(origins, strings.TrimSpace(o))
+		}
+	}
+
 	cfg := &Config{
+		APIKey:                  getEnv("API_KEY", ""),
+		AllowedOrigins:          origins,
 		IDPSDeploymentMode:      getEnv("IDPS_DEPLOYMENT_MODE", "HOST"), // HOST or NETWORK
 		IDPSSecurityMode:        getEnv("IDPS_SECURITY_MODE", "IDS"),    // IDS or IPS
 		WanInterface:            getEnv("WAN_INTERFACE", autoWan),

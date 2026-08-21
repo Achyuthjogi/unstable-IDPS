@@ -10,11 +10,13 @@ func (r *Rule) Match(payload []byte) bool {
 	cursor := 0
 
 	for _, content := range r.Contents {
-		start := cursor
+		start := 0
 		if content.Modifier.Offset >= 0 {
 			start = content.Modifier.Offset
 		} else if content.Modifier.Distance >= 0 {
 			start = cursor + content.Modifier.Distance
+		} else if content.Modifier.Within >= 0 {
+			start = cursor
 		}
 
 		if start > len(payload) {
@@ -23,11 +25,11 @@ func (r *Rule) Match(payload []byte) bool {
 		
 		end := len(payload)
 		if content.Modifier.Depth >= 0 {
-			if start + content.Modifier.Depth < end {
+			if start + content.Modifier.Depth <= end {
 				end = start + content.Modifier.Depth
 			}
 		} else if content.Modifier.Within >= 0 {
-			if start + content.Modifier.Within < end {
+			if start + content.Modifier.Within <= end {
 				end = start + content.Modifier.Within
 			}
 		}

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 
-export const useWebSocket = (url: string) => {
+export const useWebSocket = (url: string, protocols?: string | string[]) => {
   const [data, setData] = useState<any>(null);
   const [status, setStatus] = useState<string>('connecting');
   const isCleaningUp = useRef(false);
@@ -11,7 +11,7 @@ export const useWebSocket = (url: string) => {
     let reconnectTimer: ReturnType<typeof setTimeout>;
 
     const connect = () => {
-      ws = new WebSocket(url);
+      ws = new WebSocket(url, protocols);
 
       ws.onopen = () => {
         setStatus('connected');

@@ -2,6 +2,7 @@ package detection
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -13,8 +14,29 @@ import (
 	"github.com/google/uuid"
 )
 
-func isInternalIP(ip string) bool {
-	return strings.HasPrefix(ip, "192.168.") || strings.HasPrefix(ip, "10.") || (strings.HasPrefix(ip, "172.") && len(ip) > 4 && ip[4] >= '1' && ip[4] <= '3')
+var privateCIDRs []*net.IPNet
+
+func init() {
+	for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
+		_, block, _ := net.ParseCIDR(cidr)
+		privateCIDRs = append(privateCIDRs, block)
+	}
+}
+
+func isInternalIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	for _, block := range privateCIDRs {
+		if block.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func getTimestamp() float64 {
@@ -40,6 +62,17 @@ type PacketInfo struct {
 
 func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, alertLogger *alert.Logger, packet PacketInfo) {
 	currentTime := getTimestamp()
+
+	cfg.Mu.RLock()
+	secMode := cfg.IDPSSecurityMode
+	synThresh := cfg.SYNFloodThreshold
+	sshThresh := cfg.SSHBruteForceThreshold
+	portScanThresh := cfg.PortScanThreshold
+	udpThresh := cfg.UDPFloodThreshold
+	dhcpIp := cfg.LegitimateDHCPServerIP
+	gatewayIp := cfg.GatewayIP
+	susRate := cfg.SuspiciousRateThreshold
+	cfg.Mu.RUnlock()
 
 	if packet.SrcIP == "" {
 		return
@@ -88,7 +121,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 
 	// Skip blocked IPs (IPS mode)
 	st.Mu.RLock()
-	if cfg.IDPSSecurityMode == "IPS" {
+	if secMode == "IPS" {
 		if _, blocked := st.BlockedIPs[srcIP]; blocked {
 			st.Mu.RUnlock()
 			return
@@ -233,7 +266,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 			synRate := addTimestamp(&synTs, currentTime)
 			st.IPSYNTimestamps[srcIP] = synTs
 
-			if synRate > cfg.SYNFloodThreshold && uniquePortsRate <= 5 {
+			if synRate > synThresh && uniquePortsRate <= 5 {
 				triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SYN-001", "SYN Flood", "High", "High", srcIP, dstIP, fmt.Sprintf("SYN Flood (%d pkts/s)", synRate), float64(synRate))
 			}
 
@@ -246,7 +279,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 				sshRate := addTimestamp(&sshTs, currentTime)
 				st.IPSSHTimestamps[srcIP] = sshTs
 
-				if sshRate > cfg.SSHBruteForceThreshold {
+				if sshRate > sshThresh {
 					triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SSH-001", "SSH Brute Force", "Critical", "High", srcIP, dstIP, fmt.Sprintf("SSH Brute Force (%d attempts/3s)", sshRate), float64(sshRate))
 				}
 			}
@@ -257,7 +290,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		isPortScan = true
 	}
 
-	if uniquePortsRate > cfg.PortScanThreshold {
+	if uniquePortsRate > portScanThresh {
 		triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SCAN-001", "Port Scan", "High", "High", srcIP, dstIP, fmt.Sprintf("Port Scan (%d ports/3s)", uniquePortsRate), float64(uniquePortsRate))
 	}
 
@@ -272,9 +305,9 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		st.IPUDPTimestamps[srcIP] = udpTs
 
 		// Adjust threshold if packets are large
-		effectiveThreshold := cfg.UDPFloodThreshold
+		effectiveThreshold := udpThresh
 		if len(packet.Payload) > 1000 {
-			effectiveThreshold = cfg.UDPFloodThreshold / 2
+			effectiveThreshold = udpThresh / 2
 		}
 
 		if udpRate > effectiveThreshold {
@@ -301,8 +334,8 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 				}
 			}
 			if packet.IsDHCPOffer {
-				if cfg.LegitimateDHCPServerIP != "" && srcIP != cfg.LegitimateDHCPServerIP {
-					triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DHCP-001", "Rogue DHCP Server Detected", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Rogue DHCP Offer from %s", srcIP), 1.0)
+				if dhcpIp != "" && srcIP != dhcpIp {
+					triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DHCP-002", "Rogue DHCP Server Detected", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Rogue DHCP Offer from %s", srcIP), 1.0)
 				}
 			}
 		}
@@ -345,7 +378,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 					}
 				} else {
 					// Reply
-					if isInternalIP(srcIP) && srcIP != cfg.GatewayIP && cfg.GatewayIP != "" {
+					if isInternalIP(srcIP) && srcIP != gatewayIp && gatewayIp != "" {
 						triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-003", "DNS Spoofing", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DNS Reply from unauthorized internal host %s", srcIP), 1.0)
 					}
 					// Simple check for large TXT replies could be added here by parsing the answers, but keeping it simple.
@@ -393,7 +426,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 	}
 
 	// DoS Generic Flood
-	if packetRate > cfg.SuspiciousRateThreshold && !isPortScan {
+	if packetRate > susRate && !isPortScan {
 		triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DOS-001", "DoS Attack", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DoS Attack (%d pkts/s)", packetRate), float64(packetRate))
 	}
 
@@ -426,7 +459,12 @@ func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 		Rate:         rate,
 	}
 
-	if cfg.IDPSSecurityMode == "IDS" {
+	cfg.Mu.RLock()
+	secMode := cfg.IDPSSecurityMode
+	ttl := cfg.BlockTTLSeconds
+	cfg.Mu.RUnlock()
+
+	if secMode == "IDS" {
 		alert.Action = "ALERT"
 		alert.ActionResult = "SUCCESS"
 		alert.Status = "LOGGED"
@@ -442,7 +480,7 @@ func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 			if blockSuccess {
 				alert.ActionResult = "SUCCESS"
 				alert.Status = "BLOCKED"
-				expiresAt := currentTime + float64(cfg.BlockTTLSeconds)
+				expiresAt := currentTime + float64(ttl)
 				alert.ExpiresAt = expiresAt
 
 				st.BlockedIPs[srcIP] = state.IPBlock{

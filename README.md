@@ -85,6 +85,7 @@ IDPS/
 * Go 1.20+
 * Node.js v20+ (with npm)
 * Linux OS (Ubuntu recommended) for raw socket capture
+* TLS-terminating reverse proxy (Nginx, Caddy) recommended for production
 
 ### 1. Setup Backend
 Open a terminal and navigate to the project root:
@@ -93,6 +94,7 @@ Open a terminal and navigate to the project root:
 cd backend
 go build -o idps-backend
 
+# Create a .env file based on the config section below
 # Run the backend with sudo (required for raw packet capture)
 sudo ./idps-backend
 ```
@@ -105,9 +107,31 @@ cd frontend
 # Install dependencies
 npm install
 
-# Start the development server
+# Set VITE_API_KEY in .env to match the backend API_KEY
+# Start the development server or build for production
 npm run dev
 ```
+
+---
+
+## Configuration
+
+The IDPS is configured via a `.env` file in the `backend/` directory:
+
+```env
+API_KEY=your_secure_api_key_here
+ALLOWED_ORIGINS=https://your-frontend-domain.com
+IDPS_DEPLOYMENT_MODE=GATEWAY # or HOST, NETWORK
+IDPS_SECURITY_MODE=IPS       # or IDS
+WAN_INTERFACE=eth0           # Internet-facing interface
+LAN_INTERFACE=eth1           # Internal network interface
+```
+
+### Production Security Requirements
+
+1. **Authentication:** The API requires an `API_KEY` to be set in the backend `.env` file. The frontend must also have this key configured (`VITE_API_KEY`) to authenticate requests.
+2. **TLS / SSL:** The Go backend serves standard HTTP. For production, it **must** be deployed behind a TLS-terminating reverse proxy (such as Nginx or Caddy) to secure the API and WebSocket connections. The frontend expects to connect via `https://` and `wss://`.
+3. **CORS:** Ensure `ALLOWED_ORIGINS` is strictly configured to your frontend domain to prevent unauthorized access.
 
 ---
 

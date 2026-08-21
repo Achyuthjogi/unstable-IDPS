@@ -10,7 +10,8 @@ export default function Dashboard({ data, status }: { data: any, status: string 
 	const [packetHistory, setPacketHistory] = useState<{ time: string, packets: number }[]>([]);
 
 const API_HOST = window.location.hostname;
-const API_BASE = `http://${API_HOST}:8000`;
+const API_BASE = `https://${API_HOST}:8000`;
+const API_KEY = import.meta.env.VITE_API_KEY || '';
   const [showDevicesModal, setShowDevicesModal] = useState(false);
   const [showTrafficModal, setShowTrafficModal] = useState(false);
   const [showLiveTrafficModal, setShowLiveTrafficModal] = useState(false);
@@ -268,7 +269,10 @@ const API_BASE = `http://${API_HOST}:8000`;
               {blockedIPs.map((ip: string) => (
                 <div key={ip} className="px-3 py-1.5 kinetic-card text-red-500 rounded-lg font-mono text-sm flex items-center gap-2">
                   {ip}
-                  <button onClick={() => fetch(`${API_BASE}/api/unblock/${ip}`, { method: 'POST' })} className="hover:text-red-400 transition-colors">
+                  <button onClick={() => fetch(`${API_BASE}/api/unblock/${ip}`, { 
+                    method: 'POST',
+                    headers: { 'X-API-Key': API_KEY }
+                  })} className="hover:text-red-400 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
                   </button>
                 </div>
