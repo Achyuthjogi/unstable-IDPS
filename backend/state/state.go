@@ -218,6 +218,12 @@ func (s *AppState) cleanupLoop() {
 			}
 		}
 
+		for mac, device := range s.Devices {
+			if now-device.LastSeen > 300.0 {
+				delete(s.Devices, mac)
+			}
+		}
+
 		for key, t := range s.LastAlertTimes {
 			if now-t > 300.0 {
 				delete(s.LastAlertTimes, key)
