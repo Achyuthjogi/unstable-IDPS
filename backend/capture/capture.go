@@ -93,7 +93,14 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 					continue
 				}
 
-				ts := getTimestamp()
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Printf("worker %d: recovered from panic while processing packet: %v\n", workerID, r)
+						}
+					}()
+
+					ts := getTimestamp()
 
 				pktInfo := detection.PacketInfo{
 					Protocol: "UNKNOWN",
@@ -219,6 +226,7 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 					// Direct processing - zero channel handoff!
 					eng.ProcessPacket(pktInfo)
 				}
+				}()
 			}
 		}(i, handle, engine)
 	}

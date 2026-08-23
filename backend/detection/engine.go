@@ -112,12 +112,19 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "Deprecated SSH Version Detected", "policy-violation", 3, "NET-SSH-POLICY", packet.SrcMAC)
 		}
 	} else if (packet.DstPort == 53 || packet.SrcPort == 53) && packet.Protocol == "UDP" {
-		dnsLayer := &layers.DNS{}
-		if err := dnsLayer.DecodeFromBytes(packet.Payload, gopacket.NilDecodeFeedback); err == nil {
-			if e.DNSInspect.Inspect(dnsLayer, true) {
-				e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "DNS Protocol Anomaly Detected", "protocol-command-decode", 3, "NET-DNS-ANOMALY", packet.SrcMAC)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("engine: recovered from panic during DNS decode: %v\n", r)
+				}
+			}()
+			dnsLayer := &layers.DNS{}
+			if err := dnsLayer.DecodeFromBytes(packet.Payload, gopacket.NilDecodeFeedback); err == nil {
+				if e.DNSInspect.Inspect(dnsLayer, true) {
+					e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "DNS Protocol Anomaly Detected", "protocol-command-decode", 3, "NET-DNS-ANOMALY", packet.SrcMAC)
+				}
 			}
-		}
+		}()
 	}
 
 	// 4. Rule Evaluation (on reassembled stream)
