@@ -83,6 +83,30 @@ type Flow struct {
 
 	// ML prediction throttle
 	LastMLCheck float64
+
+	// ── Active/Idle ──────────────────────────────────────────────────────
+	ActivePeriods      []float64
+	IdlePeriods        []float64
+	CurrentActiveStart time.Time
+
+	// ── Bulk state ───────────────────────────────────────────────────────
+	FwdBulkStatePktCount  int
+	FwdBulkStateByteCount uint64
+	FwdBulkStateStart     time.Time
+	FwdBulkStateLastTime  time.Time
+	FwdTotalBulkPkts      uint64
+	FwdTotalBulkBytes     uint64
+	FwdTotalBulkDuration  time.Duration
+	FwdBulkCount          uint64
+
+	BwdBulkStatePktCount  int
+	BwdBulkStateByteCount uint64
+	BwdBulkStateStart     time.Time
+	BwdBulkStateLastTime  time.Time
+	BwdTotalBulkPkts      uint64
+	BwdTotalBulkBytes     uint64
+	BwdTotalBulkDuration  time.Duration
+	BwdBulkCount          uint64
 }
 
 // Tracker manages active network flows.
@@ -140,6 +164,8 @@ func (t *Tracker) GetOrCreate(key Key, pktSrcIP [16]byte, pktSrcPort uint16) (*F
 		AllIATs:          make([]float64, 0, 128),
 		InitWinFwd:       -1,
 		InitWinBwd:       -1,
+		ActivePeriods:    make([]float64, 0, 64),
+		IdlePeriods:      make([]float64, 0, 64),
 	}
 	t.flows[key] = f
 	return f, true
@@ -160,16 +186,34 @@ func (t *Tracker) UpdateFlowML(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, pa
 
 	isClientToServer := f.OriginalSrcIP == pktSrcIP && f.OriginalSrcPort == pktSrcPort
 
-	// ── IAT tracking ─────────────────────────────────────────────────────
+	// ── IAT tracking & Active/Idle ───────────────────────────────────────
 	if !f.LastPktTime.IsZero() {
 		iat := float64(now.Sub(f.LastPktTime).Microseconds())
 		if len(f.AllIATs) < 1000 {
 			f.AllIATs = append(f.AllIATs, iat)
 		}
+
+		// Active / Idle logic
+		gap := float64(now.Sub(f.LastPktTime).Seconds())
+		if gap > 1.0 {
+			if !f.CurrentActiveStart.IsZero() {
+				activeDuration := float64(f.LastPktTime.Sub(f.CurrentActiveStart).Microseconds())
+				if len(f.ActivePeriods) < 1000 {
+					f.ActivePeriods = append(f.ActivePeriods, activeDuration)
+				}
+			}
+			idleDuration := float64(now.Sub(f.LastPktTime).Microseconds())
+			if len(f.IdlePeriods) < 1000 {
+				f.IdlePeriods = append(f.IdlePeriods, idleDuration)
+			}
+			f.CurrentActiveStart = now
+		}
+	} else {
+		f.CurrentActiveStart = now
 	}
 	f.LastPktTime = now
 
-	// ── Directional stats ────────────────────────────────────────────────
+	// ── Directional stats & Bulk ─────────────────────────────────────────
 	if isClientToServer {
 		f.FwdPacketCount++
 		f.FwdByteCount += uint64(pktLen)
@@ -187,6 +231,28 @@ func (t *Tracker) UpdateFlowML(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, pa
 		if pktLen > 0 {
 			f.ActDataPktFwd++
 		}
+
+		// Bulk logic for Fwd
+		if f.FwdBulkStateLastTime.IsZero() || now.Sub(f.FwdBulkStateLastTime).Seconds() > 1.0 {
+			f.FwdBulkStateStart = now
+			f.FwdBulkStatePktCount = 1
+			f.FwdBulkStateByteCount = uint64(pktLen)
+		} else {
+			f.FwdBulkStatePktCount++
+			f.FwdBulkStateByteCount += uint64(pktLen)
+			if f.FwdBulkStatePktCount == 4 {
+				f.FwdBulkCount++
+				f.FwdTotalBulkPkts += uint64(f.FwdBulkStatePktCount)
+				f.FwdTotalBulkBytes += f.FwdBulkStateByteCount
+				f.FwdTotalBulkDuration += now.Sub(f.FwdBulkStateStart)
+			} else if f.FwdBulkStatePktCount > 4 {
+				f.FwdTotalBulkPkts++
+				f.FwdTotalBulkBytes += uint64(pktLen)
+				f.FwdTotalBulkDuration += now.Sub(f.FwdBulkStateLastTime)
+			}
+		}
+		f.FwdBulkStateLastTime = now
+
 	} else {
 		f.BwdPacketCount++
 		f.BwdByteCount += uint64(pktLen)
@@ -201,6 +267,27 @@ func (t *Tracker) UpdateFlowML(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, pa
 		}
 		f.LastBwdTime = now
 		f.BwdHeaderLen += uint64(headerLen)
+
+		// Bulk logic for Bwd
+		if f.BwdBulkStateLastTime.IsZero() || now.Sub(f.BwdBulkStateLastTime).Seconds() > 1.0 {
+			f.BwdBulkStateStart = now
+			f.BwdBulkStatePktCount = 1
+			f.BwdBulkStateByteCount = uint64(pktLen)
+		} else {
+			f.BwdBulkStatePktCount++
+			f.BwdBulkStateByteCount += uint64(pktLen)
+			if f.BwdBulkStatePktCount == 4 {
+				f.BwdBulkCount++
+				f.BwdTotalBulkPkts += uint64(f.BwdBulkStatePktCount)
+				f.BwdTotalBulkBytes += f.BwdBulkStateByteCount
+				f.BwdTotalBulkDuration += now.Sub(f.BwdBulkStateStart)
+			} else if f.BwdBulkStatePktCount > 4 {
+				f.BwdTotalBulkPkts++
+				f.BwdTotalBulkBytes += uint64(pktLen)
+				f.BwdTotalBulkDuration += now.Sub(f.BwdBulkStateLastTime)
+			}
+		}
+		f.BwdBulkStateLastTime = now
 	}
 
 	// ── TCP flags ────────────────────────────────────────────────────────

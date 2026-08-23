@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"time"
 
@@ -152,13 +151,17 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 	defer f.Mu.Unlock()
 
 	durationUs := float64(f.LastSeen.Sub(f.CreatedAt).Microseconds())
-	if durationUs < 1 {
-		durationUs = 1
-	}
-	durationS := durationUs / 1e6
-
 	totalPackets := f.FwdPacketCount + f.BwdPacketCount
 	totalBytes := f.FwdByteCount + f.BwdByteCount
+
+	var flowBytesPerS, flowPacketsPerS, fwdPacketsPerS, bwdPacketsPerS float64
+	if durationUs > 0 {
+		durationS := durationUs / 1e6
+		flowBytesPerS = float64(totalBytes) / durationS
+		flowPacketsPerS = float64(totalPackets) / durationS
+		fwdPacketsPerS = float64(f.FwdPacketCount) / durationS
+		bwdPacketsPerS = float64(f.BwdPacketCount) / durationS
+	}
 
 	fwdLens := flow.IntSliceToFloat(f.FwdPacketLengths)
 	bwdLens := flow.IntSliceToFloat(f.BwdPacketLengths)
@@ -204,6 +207,38 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 		initWinBwd = float64(f.InitWinBwd)
 	}
 
+	// Active and Idle periods
+	activePeriods := make([]float64, len(f.ActivePeriods))
+	copy(activePeriods, f.ActivePeriods)
+	if !f.CurrentActiveStart.IsZero() {
+		ongoing := float64(f.LastSeen.Sub(f.CurrentActiveStart).Microseconds())
+		if ongoing > 0 {
+			activePeriods = append(activePeriods, ongoing)
+		}
+	}
+	
+	idlePeriods := make([]float64, len(f.IdlePeriods))
+	copy(idlePeriods, f.IdlePeriods)
+
+	// Bulk averages
+	var fwdAvgBytesPerBulk, fwdAvgPacketsPerBulk, fwdAvgBulkRate float64
+	if f.FwdBulkCount > 0 {
+		fwdAvgBytesPerBulk = float64(f.FwdTotalBulkBytes) / float64(f.FwdBulkCount)
+		fwdAvgPacketsPerBulk = float64(f.FwdTotalBulkPkts) / float64(f.FwdBulkCount)
+		if f.FwdTotalBulkDuration > 0 {
+			fwdAvgBulkRate = float64(f.FwdTotalBulkBytes) / f.FwdTotalBulkDuration.Seconds()
+		}
+	}
+
+	var bwdAvgBytesPerBulk, bwdAvgPacketsPerBulk, bwdAvgBulkRate float64
+	if f.BwdBulkCount > 0 {
+		bwdAvgBytesPerBulk = float64(f.BwdTotalBulkBytes) / float64(f.BwdBulkCount)
+		bwdAvgPacketsPerBulk = float64(f.BwdTotalBulkPkts) / float64(f.BwdBulkCount)
+		if f.BwdTotalBulkDuration > 0 {
+			bwdAvgBulkRate = float64(f.BwdTotalBulkBytes) / f.BwdTotalBulkDuration.Seconds()
+		}
+	}
+
 	return FlowFeatures{
 		DestinationPort:      dp,
 		FlowDuration:         durationUs,
@@ -219,8 +254,8 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 		BwdPktLenMin:         flow.SliceMin(bwdLens),
 		BwdPktLenMean:        flow.SliceMean(bwdLens),
 		BwdPktLenStd:         flow.SliceStd(bwdLens),
-		FlowBytesPerS:        float64(totalBytes) / durationS,
-		FlowPacketsPerS:      float64(totalPackets) / durationS,
+		FlowBytesPerS:        flowBytesPerS,
+		FlowPacketsPerS:      flowPacketsPerS,
 		FlowIATMean:          flow.SliceMean(allIATs),
 		FlowIATStd:           flow.SliceStd(allIATs),
 		FlowIATMax:           flow.SliceMax(allIATs),
@@ -241,8 +276,8 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 		BwdURGFlags:          float64(f.BwdURGFlags),
 		FwdHeaderLength:      float64(f.FwdHeaderLen),
 		BwdHeaderLength:      float64(f.BwdHeaderLen),
-		FwdPacketsPerS:       float64(f.FwdPacketCount) / durationS,
-		BwdPacketsPerS:       float64(f.BwdPacketCount) / durationS,
+		FwdPacketsPerS:       fwdPacketsPerS,
+		BwdPacketsPerS:       bwdPacketsPerS,
 		MinPacketLength:      flow.SliceMin(allLens),
 		MaxPacketLength:      flow.SliceMax(allLens),
 		PacketLengthMean:     flow.SliceMean(allLens),
@@ -259,6 +294,12 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 		AvgFwdSegmentSize:    avgFwdSeg,
 		AvgBwdSegmentSize:    avgBwdSeg,
 		FwdHeaderLength1:     float64(f.FwdHeaderLen),
+		FwdAvgBytesPerBulk:   fwdAvgBytesPerBulk,
+		FwdAvgPacketsPerBulk: fwdAvgPacketsPerBulk,
+		FwdAvgBulkRate:       fwdAvgBulkRate,
+		BwdAvgBytesPerBulk:   bwdAvgBytesPerBulk,
+		BwdAvgPacketsPerBulk: bwdAvgPacketsPerBulk,
+		BwdAvgBulkRate:       bwdAvgBulkRate,
 		SubflowFwdPackets:    float64(f.FwdPacketCount),
 		SubflowFwdBytes:      float64(f.FwdByteCount),
 		SubflowBwdPackets:    float64(f.BwdPacketCount),
@@ -266,6 +307,15 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 		InitWinBytesForward:  initWinFwd,
 		InitWinBytesBackward: initWinBwd,
 		ActDataPktFwd:        float64(f.ActDataPktFwd),
+		MinSegSizeForward:    0,
+		ActiveMean:           flow.SliceMean(activePeriods),
+		ActiveStd:            flow.SliceStd(activePeriods),
+		ActiveMax:            flow.SliceMax(activePeriods),
+		ActiveMin:            flow.SliceMin(activePeriods),
+		IdleMean:             flow.SliceMean(idlePeriods),
+		IdleStd:              flow.SliceStd(idlePeriods),
+		IdleMax:              flow.SliceMax(idlePeriods),
+		IdleMin:              flow.SliceMin(idlePeriods),
 	}
 }
 
@@ -282,10 +332,7 @@ func (c *MLClient) Predict(features FlowFeatures) (*MLResponse, error) {
 
 	resp, err := c.httpClient.Post(c.endpoint+"/predict", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		// Check if it's a connection error to mark service as unavailable
-		if _, ok := err.(*net.OpError); ok {
-			c.available = false
-		}
+		c.available = false
 		return nil, fmt.Errorf("ML service request failed: %w", err)
 	}
 	defer resp.Body.Close()
