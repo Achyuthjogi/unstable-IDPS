@@ -84,30 +84,34 @@ type Flow struct {
 	// ML prediction throttle
 	LastMLCheck float64
 
-	// ── Active/Idle ──────────────────────────────────────────────────────
-	ActivePeriods      []float64
-	IdlePeriods        []float64
-	CurrentActiveStart time.Time
+	// ── Bulk tracking (CICFlowMeter definition: run of ≥4 consecutive
+	// same-direction packets with no gap >1s between them) ────────────────
+	FwdBulkBytes, BwdBulkBytes       uint64
+	FwdBulkPackets, BwdBulkPackets   uint64
+	FwdBulkDurationUs, BwdBulkDurationUs float64 // sum of completed-bulk durations (us)
+	FwdBulkCount, BwdBulkCount       uint64
 
-	// ── Bulk state ───────────────────────────────────────────────────────
-	FwdBulkStatePktCount  int
-	FwdBulkStateByteCount uint64
-	FwdBulkStateStart     time.Time
-	FwdBulkStateLastTime  time.Time
-	FwdTotalBulkPkts      uint64
-	FwdTotalBulkBytes     uint64
-	FwdTotalBulkDuration  time.Duration
-	FwdBulkCount          uint64
+	// In-progress (not-yet-closed) bulk run state. Exported so the
+	// detection package can peek at it when extracting live features
+	// without needing an accessor method for every field.
+	FwdBulkRunPackets uint64
+	FwdBulkRunBytes   uint64
+	FwdBulkRunStart   time.Time
+	FwdBulkRunEnd     time.Time
+	BwdBulkRunPackets uint64
+	BwdBulkRunBytes   uint64
+	BwdBulkRunStart   time.Time
+	BwdBulkRunEnd     time.Time
 
-	BwdBulkStatePktCount  int
-	BwdBulkStateByteCount uint64
-	BwdBulkStateStart     time.Time
-	BwdBulkStateLastTime  time.Time
-	BwdTotalBulkPkts      uint64
-	BwdTotalBulkBytes     uint64
-	BwdTotalBulkDuration  time.Duration
-	BwdBulkCount          uint64
+	// ── Active/idle period tracking (gap >1s closes the active period and
+	// opens an idle period) ─────────────────────────────────────────────
+	ActivePeriods []float64 // durations of completed active bursts (us)
+	IdlePeriods   []float64 // durations of completed idle gaps (us)
+	ActiveStart   time.Time // start of the currently open (not yet closed) active period
+	ActiveEnd     time.Time // last packet time within the currently open active period
 }
+
+const bulkIdleThresholdUs = 1e6 // 1 second, in microseconds
 
 // Tracker manages active network flows.
 type Tracker struct {
@@ -164,8 +168,6 @@ func (t *Tracker) GetOrCreate(key Key, pktSrcIP [16]byte, pktSrcPort uint16) (*F
 		AllIATs:          make([]float64, 0, 128),
 		InitWinFwd:       -1,
 		InitWinBwd:       -1,
-		ActivePeriods:    make([]float64, 0, 64),
-		IdlePeriods:      make([]float64, 0, 64),
 	}
 	t.flows[key] = f
 	return f, true
@@ -186,34 +188,34 @@ func (t *Tracker) UpdateFlowML(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, pa
 
 	isClientToServer := f.OriginalSrcIP == pktSrcIP && f.OriginalSrcPort == pktSrcPort
 
-	// ── IAT tracking & Active/Idle ───────────────────────────────────────
+	// ── IAT tracking ─────────────────────────────────────────────────────
 	if !f.LastPktTime.IsZero() {
 		iat := float64(now.Sub(f.LastPktTime).Microseconds())
 		if len(f.AllIATs) < 1000 {
 			f.AllIATs = append(f.AllIATs, iat)
 		}
 
-		// Active / Idle logic
-		gap := float64(now.Sub(f.LastPktTime).Seconds())
-		if gap > 1.0 {
-			if !f.CurrentActiveStart.IsZero() {
-				activeDuration := float64(f.LastPktTime.Sub(f.CurrentActiveStart).Microseconds())
-				if len(f.ActivePeriods) < 1000 {
-					f.ActivePeriods = append(f.ActivePeriods, activeDuration)
-				}
+		// ── Active/idle period tracking ────────────────────────────────
+		// A gap larger than the idle threshold closes the current active
+		// burst and opens an idle period; otherwise the burst just extends.
+		if iat > bulkIdleThresholdUs {
+			if len(f.ActivePeriods) < 1000 {
+				f.ActivePeriods = append(f.ActivePeriods, float64(f.ActiveEnd.Sub(f.ActiveStart).Microseconds()))
 			}
-			idleDuration := float64(now.Sub(f.LastPktTime).Microseconds())
 			if len(f.IdlePeriods) < 1000 {
-				f.IdlePeriods = append(f.IdlePeriods, idleDuration)
+				f.IdlePeriods = append(f.IdlePeriods, iat)
 			}
-			f.CurrentActiveStart = now
+			f.ActiveStart = now
 		}
+		f.ActiveEnd = now
 	} else {
-		f.CurrentActiveStart = now
+		// First packet of the flow starts the first active period.
+		f.ActiveStart = now
+		f.ActiveEnd = now
 	}
 	f.LastPktTime = now
 
-	// ── Directional stats & Bulk ─────────────────────────────────────────
+	// ── Directional stats ────────────────────────────────────────────────
 	if isClientToServer {
 		f.FwdPacketCount++
 		f.FwdByteCount += uint64(pktLen)
@@ -230,29 +232,28 @@ func (t *Tracker) UpdateFlowML(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, pa
 		f.FwdHeaderLen += uint64(headerLen)
 		if pktLen > 0 {
 			f.ActDataPktFwd++
-		}
-
-		// Bulk logic for Fwd
-		if f.FwdBulkStateLastTime.IsZero() || now.Sub(f.FwdBulkStateLastTime).Seconds() > 1.0 {
-			f.FwdBulkStateStart = now
-			f.FwdBulkStatePktCount = 1
-			f.FwdBulkStateByteCount = uint64(pktLen)
-		} else {
-			f.FwdBulkStatePktCount++
-			f.FwdBulkStateByteCount += uint64(pktLen)
-			if f.FwdBulkStatePktCount == 4 {
-				f.FwdBulkCount++
-				f.FwdTotalBulkPkts += uint64(f.FwdBulkStatePktCount)
-				f.FwdTotalBulkBytes += f.FwdBulkStateByteCount
-				f.FwdTotalBulkDuration += now.Sub(f.FwdBulkStateStart)
-			} else if f.FwdBulkStatePktCount > 4 {
-				f.FwdTotalBulkPkts++
-				f.FwdTotalBulkBytes += uint64(pktLen)
-				f.FwdTotalBulkDuration += now.Sub(f.FwdBulkStateLastTime)
+			// ── Bulk tracking (fwd): run of ≥4 consecutive data-bearing
+			// packets in the same direction with gaps ≤1s counts as a bulk.
+			if f.FwdBulkRunPackets > 0 {
+				gap := float64(now.Sub(f.FwdBulkRunEnd).Microseconds())
+				if gap > bulkIdleThresholdUs {
+					if f.FwdBulkRunPackets >= 4 {
+						f.FwdBulkBytes += f.FwdBulkRunBytes
+						f.FwdBulkPackets += f.FwdBulkRunPackets
+						f.FwdBulkDurationUs += float64(f.FwdBulkRunEnd.Sub(f.FwdBulkRunStart).Microseconds())
+						f.FwdBulkCount++
+					}
+					f.FwdBulkRunPackets = 0
+					f.FwdBulkRunBytes = 0
+					f.FwdBulkRunStart = now
+				}
+			} else {
+				f.FwdBulkRunStart = now
 			}
+			f.FwdBulkRunPackets++
+			f.FwdBulkRunBytes += uint64(pktLen)
+			f.FwdBulkRunEnd = now
 		}
-		f.FwdBulkStateLastTime = now
-
 	} else {
 		f.BwdPacketCount++
 		f.BwdByteCount += uint64(pktLen)
@@ -267,27 +268,28 @@ func (t *Tracker) UpdateFlowML(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, pa
 		}
 		f.LastBwdTime = now
 		f.BwdHeaderLen += uint64(headerLen)
-
-		// Bulk logic for Bwd
-		if f.BwdBulkStateLastTime.IsZero() || now.Sub(f.BwdBulkStateLastTime).Seconds() > 1.0 {
-			f.BwdBulkStateStart = now
-			f.BwdBulkStatePktCount = 1
-			f.BwdBulkStateByteCount = uint64(pktLen)
-		} else {
-			f.BwdBulkStatePktCount++
-			f.BwdBulkStateByteCount += uint64(pktLen)
-			if f.BwdBulkStatePktCount == 4 {
-				f.BwdBulkCount++
-				f.BwdTotalBulkPkts += uint64(f.BwdBulkStatePktCount)
-				f.BwdTotalBulkBytes += f.BwdBulkStateByteCount
-				f.BwdTotalBulkDuration += now.Sub(f.BwdBulkStateStart)
-			} else if f.BwdBulkStatePktCount > 4 {
-				f.BwdTotalBulkPkts++
-				f.BwdTotalBulkBytes += uint64(pktLen)
-				f.BwdTotalBulkDuration += now.Sub(f.BwdBulkStateLastTime)
+		if pktLen > 0 {
+			// ── Bulk tracking (bwd): same rule as fwd, mirrored.
+			if f.BwdBulkRunPackets > 0 {
+				gap := float64(now.Sub(f.BwdBulkRunEnd).Microseconds())
+				if gap > bulkIdleThresholdUs {
+					if f.BwdBulkRunPackets >= 4 {
+						f.BwdBulkBytes += f.BwdBulkRunBytes
+						f.BwdBulkPackets += f.BwdBulkRunPackets
+						f.BwdBulkDurationUs += float64(f.BwdBulkRunEnd.Sub(f.BwdBulkRunStart).Microseconds())
+						f.BwdBulkCount++
+					}
+					f.BwdBulkRunPackets = 0
+					f.BwdBulkRunBytes = 0
+					f.BwdBulkRunStart = now
+				}
+			} else {
+				f.BwdBulkRunStart = now
 			}
+			f.BwdBulkRunPackets++
+			f.BwdBulkRunBytes += uint64(pktLen)
+			f.BwdBulkRunEnd = now
 		}
-		f.BwdBulkStateLastTime = now
 	}
 
 	// ── TCP flags ────────────────────────────────────────────────────────

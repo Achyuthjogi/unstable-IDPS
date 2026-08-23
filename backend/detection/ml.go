@@ -144,6 +144,15 @@ type MLResponse struct {
 	Confidence float64 `json:"confidence"`
 }
 
+// safeRate returns numerator/durationS, or 0 if durationS is not positive —
+// avoids astronomically large rate values for near-instant flows.
+func safeRate(numerator, durationS float64) float64 {
+	if durationS <= 0 {
+		return 0
+	}
+	return numerator / durationS
+}
+
 // ExtractFlowFeatures computes the 78 CIC-IDS-2017 features from a tracked flow.
 // The flow's Mu must NOT be held when calling this function.
 func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
@@ -151,17 +160,13 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 	defer f.Mu.Unlock()
 
 	durationUs := float64(f.LastSeen.Sub(f.CreatedAt).Microseconds())
+	if durationUs < 0 {
+		durationUs = 0
+	}
+	durationS := durationUs / 1e6
+
 	totalPackets := f.FwdPacketCount + f.BwdPacketCount
 	totalBytes := f.FwdByteCount + f.BwdByteCount
-
-	var flowBytesPerS, flowPacketsPerS, fwdPacketsPerS, bwdPacketsPerS float64
-	if durationUs > 0 {
-		durationS := durationUs / 1e6
-		flowBytesPerS = float64(totalBytes) / durationS
-		flowPacketsPerS = float64(totalPackets) / durationS
-		fwdPacketsPerS = float64(f.FwdPacketCount) / durationS
-		bwdPacketsPerS = float64(f.BwdPacketCount) / durationS
-	}
 
 	fwdLens := flow.IntSliceToFloat(f.FwdPacketLengths)
 	bwdLens := flow.IntSliceToFloat(f.BwdPacketLengths)
@@ -187,6 +192,44 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 
 	pktLenStd := flow.SliceStd(allLens)
 
+	// ── Bulk features: include the in-progress run if it already
+	// qualifies (≥4 data packets), without mutating flow state. ──────────
+	fwdBulkBytes, fwdBulkPackets, fwdBulkDurUs, fwdBulkCount := f.FwdBulkBytes, f.FwdBulkPackets, f.FwdBulkDurationUs, f.FwdBulkCount
+	if f.FwdBulkRunPackets >= 4 {
+		fwdBulkBytes += f.FwdBulkRunBytes
+		fwdBulkPackets += f.FwdBulkRunPackets
+		fwdBulkDurUs += float64(f.FwdBulkRunEnd.Sub(f.FwdBulkRunStart).Microseconds())
+		fwdBulkCount++
+	}
+	bwdBulkBytes, bwdBulkPackets, bwdBulkDurUs, bwdBulkCount := f.BwdBulkBytes, f.BwdBulkPackets, f.BwdBulkDurationUs, f.BwdBulkCount
+	if f.BwdBulkRunPackets >= 4 {
+		bwdBulkBytes += f.BwdBulkRunBytes
+		bwdBulkPackets += f.BwdBulkRunPackets
+		bwdBulkDurUs += float64(f.BwdBulkRunEnd.Sub(f.BwdBulkRunStart).Microseconds())
+		bwdBulkCount++
+	}
+
+	var fwdAvgBytesPerBulk, fwdAvgPacketsPerBulk, fwdAvgBulkRate float64
+	if fwdBulkCount > 0 {
+		fwdAvgBytesPerBulk = float64(fwdBulkBytes) / float64(fwdBulkCount)
+		fwdAvgPacketsPerBulk = float64(fwdBulkPackets) / float64(fwdBulkCount)
+		fwdAvgBulkRate = safeRate(float64(fwdBulkBytes), fwdBulkDurUs/1e6)
+	}
+	var bwdAvgBytesPerBulk, bwdAvgPacketsPerBulk, bwdAvgBulkRate float64
+	if bwdBulkCount > 0 {
+		bwdAvgBytesPerBulk = float64(bwdBulkBytes) / float64(bwdBulkCount)
+		bwdAvgPacketsPerBulk = float64(bwdBulkPackets) / float64(bwdBulkCount)
+		bwdAvgBulkRate = safeRate(float64(bwdBulkBytes), bwdBulkDurUs/1e6)
+	}
+
+	// ── Active/idle features: include the currently open active period
+	// as if it closed now, without mutating flow state. ──────────────────
+	activePeriods := append([]float64{}, f.ActivePeriods...)
+	if !f.ActiveEnd.IsZero() {
+		activePeriods = append(activePeriods, float64(f.ActiveEnd.Sub(f.ActiveStart).Microseconds()))
+	}
+	idlePeriods := f.IdlePeriods
+
 	// Copy IAT slices to avoid data race after unlock
 	fwdIATs := make([]float64, len(f.FwdIATs))
 	copy(fwdIATs, f.FwdIATs)
@@ -207,38 +250,6 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 		initWinBwd = float64(f.InitWinBwd)
 	}
 
-	// Active and Idle periods
-	activePeriods := make([]float64, len(f.ActivePeriods))
-	copy(activePeriods, f.ActivePeriods)
-	if !f.CurrentActiveStart.IsZero() {
-		ongoing := float64(f.LastSeen.Sub(f.CurrentActiveStart).Microseconds())
-		if ongoing > 0 {
-			activePeriods = append(activePeriods, ongoing)
-		}
-	}
-	
-	idlePeriods := make([]float64, len(f.IdlePeriods))
-	copy(idlePeriods, f.IdlePeriods)
-
-	// Bulk averages
-	var fwdAvgBytesPerBulk, fwdAvgPacketsPerBulk, fwdAvgBulkRate float64
-	if f.FwdBulkCount > 0 {
-		fwdAvgBytesPerBulk = float64(f.FwdTotalBulkBytes) / float64(f.FwdBulkCount)
-		fwdAvgPacketsPerBulk = float64(f.FwdTotalBulkPkts) / float64(f.FwdBulkCount)
-		if f.FwdTotalBulkDuration > 0 {
-			fwdAvgBulkRate = float64(f.FwdTotalBulkBytes) / f.FwdTotalBulkDuration.Seconds()
-		}
-	}
-
-	var bwdAvgBytesPerBulk, bwdAvgPacketsPerBulk, bwdAvgBulkRate float64
-	if f.BwdBulkCount > 0 {
-		bwdAvgBytesPerBulk = float64(f.BwdTotalBulkBytes) / float64(f.BwdBulkCount)
-		bwdAvgPacketsPerBulk = float64(f.BwdTotalBulkPkts) / float64(f.BwdBulkCount)
-		if f.BwdTotalBulkDuration > 0 {
-			bwdAvgBulkRate = float64(f.BwdTotalBulkBytes) / f.BwdTotalBulkDuration.Seconds()
-		}
-	}
-
 	return FlowFeatures{
 		DestinationPort:      dp,
 		FlowDuration:         durationUs,
@@ -254,8 +265,8 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 		BwdPktLenMin:         flow.SliceMin(bwdLens),
 		BwdPktLenMean:        flow.SliceMean(bwdLens),
 		BwdPktLenStd:         flow.SliceStd(bwdLens),
-		FlowBytesPerS:        flowBytesPerS,
-		FlowPacketsPerS:      flowPacketsPerS,
+		FlowBytesPerS:        safeRate(float64(totalBytes), durationS),
+		FlowPacketsPerS:      safeRate(float64(totalPackets), durationS),
 		FlowIATMean:          flow.SliceMean(allIATs),
 		FlowIATStd:           flow.SliceStd(allIATs),
 		FlowIATMax:           flow.SliceMax(allIATs),
@@ -276,8 +287,8 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 		BwdURGFlags:          float64(f.BwdURGFlags),
 		FwdHeaderLength:      float64(f.FwdHeaderLen),
 		BwdHeaderLength:      float64(f.BwdHeaderLen),
-		FwdPacketsPerS:       fwdPacketsPerS,
-		BwdPacketsPerS:       bwdPacketsPerS,
+		FwdPacketsPerS:       safeRate(float64(f.FwdPacketCount), durationS),
+		BwdPacketsPerS:       safeRate(float64(f.BwdPacketCount), durationS),
 		MinPacketLength:      flow.SliceMin(allLens),
 		MaxPacketLength:      flow.SliceMax(allLens),
 		PacketLengthMean:     flow.SliceMean(allLens),
@@ -294,12 +305,6 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 		AvgFwdSegmentSize:    avgFwdSeg,
 		AvgBwdSegmentSize:    avgBwdSeg,
 		FwdHeaderLength1:     float64(f.FwdHeaderLen),
-		FwdAvgBytesPerBulk:   fwdAvgBytesPerBulk,
-		FwdAvgPacketsPerBulk: fwdAvgPacketsPerBulk,
-		FwdAvgBulkRate:       fwdAvgBulkRate,
-		BwdAvgBytesPerBulk:   bwdAvgBytesPerBulk,
-		BwdAvgPacketsPerBulk: bwdAvgPacketsPerBulk,
-		BwdAvgBulkRate:       bwdAvgBulkRate,
 		SubflowFwdPackets:    float64(f.FwdPacketCount),
 		SubflowFwdBytes:      float64(f.FwdByteCount),
 		SubflowBwdPackets:    float64(f.BwdPacketCount),
@@ -307,7 +312,12 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 		InitWinBytesForward:  initWinFwd,
 		InitWinBytesBackward: initWinBwd,
 		ActDataPktFwd:        float64(f.ActDataPktFwd),
-		MinSegSizeForward:    0,
+		FwdAvgBytesPerBulk:   fwdAvgBytesPerBulk,
+		FwdAvgPacketsPerBulk: fwdAvgPacketsPerBulk,
+		FwdAvgBulkRate:       fwdAvgBulkRate,
+		BwdAvgBytesPerBulk:   bwdAvgBytesPerBulk,
+		BwdAvgPacketsPerBulk: bwdAvgPacketsPerBulk,
+		BwdAvgBulkRate:       bwdAvgBulkRate,
 		ActiveMean:           flow.SliceMean(activePeriods),
 		ActiveStd:            flow.SliceStd(activePeriods),
 		ActiveMax:            flow.SliceMax(activePeriods),
@@ -332,6 +342,9 @@ func (c *MLClient) Predict(features FlowFeatures) (*MLResponse, error) {
 
 	resp, err := c.httpClient.Post(c.endpoint+"/predict", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
+		// Any transport-level failure (connection refused, timeout, DNS, etc.)
+		// means the service is not usable right now — mark unavailable so
+		// callers stop hammering it until the next successful HealthCheck.
 		c.available = false
 		return nil, fmt.Errorf("ML service request failed: %w", err)
 	}
