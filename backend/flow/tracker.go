@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -31,6 +32,57 @@ type Flow struct {
 	// Track original direction to determine Client/Server
 	OriginalSrcIP [16]byte
 	OriginalSrcPort uint16
+
+	// ── ML Feature Tracking ──────────────────────────────────────────────
+	CreatedAt    time.Time
+
+	// Directional packet/byte counts
+	FwdPacketCount uint64
+	BwdPacketCount uint64
+	FwdByteCount   uint64
+	BwdByteCount   uint64
+
+	// Per-packet sizes for min/max/mean/std calculation (capped at 1000 entries)
+	FwdPacketLengths []int
+	BwdPacketLengths []int
+
+	// Inter-arrival times (microseconds)
+	FwdIATs     []float64
+	BwdIATs     []float64
+	AllIATs     []float64
+	LastFwdTime time.Time
+	LastBwdTime time.Time
+	LastPktTime time.Time
+
+	// TCP flag counters
+	SYNCount uint32
+	FINCount uint32
+	RSTCount uint32
+	PSHCount uint32
+	ACKCount uint32
+	URGCount uint32
+
+	// Directional flag counters
+	FwdPSHFlags uint32
+	BwdPSHFlags uint32
+	FwdURGFlags uint32
+	BwdURGFlags uint32
+
+	// Header lengths (cumulative)
+	FwdHeaderLen uint64
+	BwdHeaderLen uint64
+
+	// Initial TCP window sizes (set on first SYN/SYN-ACK)
+	InitWinFwd    int32
+	InitWinBwd    int32
+	InitWinFwdSet bool
+	InitWinBwdSet bool
+
+	// Packets with payload in forward direction
+	ActDataPktFwd uint32
+
+	// ML prediction throttle
+	LastMLCheck float64
 }
 
 // Tracker manages active network flows.
@@ -71,32 +123,112 @@ func (t *Tracker) GetOrCreate(key Key, pktSrcIP [16]byte, pktSrcPort uint16) (*F
 		return nil, false
 	}
 
+	now := time.Now()
 	f = &Flow{
-		Key:             key,
-		State:           StateNew,
-		LastSeen:        time.Now(),
-		ClientStream:    NewStreamReassembler(t.maxReassembly),
-		ServerStream:    NewStreamReassembler(t.maxReassembly),
-		OriginalSrcIP:   pktSrcIP,
-		OriginalSrcPort: pktSrcPort,
+		Key:              key,
+		State:            StateNew,
+		LastSeen:         now,
+		CreatedAt:        now,
+		ClientStream:     NewStreamReassembler(t.maxReassembly),
+		ServerStream:     NewStreamReassembler(t.maxReassembly),
+		OriginalSrcIP:    pktSrcIP,
+		OriginalSrcPort:  pktSrcPort,
+		FwdPacketLengths: make([]int, 0, 64),
+		BwdPacketLengths: make([]int, 0, 64),
+		FwdIATs:          make([]float64, 0, 64),
+		BwdIATs:          make([]float64, 0, 64),
+		AllIATs:          make([]float64, 0, 128),
+		InitWinFwd:       -1,
+		InitWinBwd:       -1,
 	}
 	t.flows[key] = f
 	return f, true
 }
 
-// UpdateFlow updates the flow state with a new packet.
-func (t *Tracker) UpdateFlow(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, payload []byte, seq uint32, tcpFlags uint8) {
+// UpdateFlowML updates the flow state with a new packet including ML-relevant metadata.
+// headerLen is the transport header length in bytes (e.g. TCP header size).
+// winSize is the TCP window size from the packet header (-1 if not TCP).
+func (t *Tracker) UpdateFlowML(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, payload []byte, seq uint32, tcpFlags uint8, headerLen int, winSize int) {
 	f.Mu.Lock()
 	defer f.Mu.Unlock()
-	
-	f.LastSeen = time.Now()
+
+	now := time.Now()
+	f.LastSeen = now
 	f.PacketCount++
-	f.ByteCount += uint64(len(payload))
+	pktLen := len(payload)
+	f.ByteCount += uint64(pktLen)
 
 	isClientToServer := f.OriginalSrcIP == pktSrcIP && f.OriginalSrcPort == pktSrcPort
 
-	// TCP state machine basic update
-	// SYN (0x02), ACK (0x10), FIN (0x01), RST (0x04)
+	// ── IAT tracking ─────────────────────────────────────────────────────
+	if !f.LastPktTime.IsZero() {
+		iat := float64(now.Sub(f.LastPktTime).Microseconds())
+		if len(f.AllIATs) < 1000 {
+			f.AllIATs = append(f.AllIATs, iat)
+		}
+	}
+	f.LastPktTime = now
+
+	// ── Directional stats ────────────────────────────────────────────────
+	if isClientToServer {
+		f.FwdPacketCount++
+		f.FwdByteCount += uint64(pktLen)
+		if len(f.FwdPacketLengths) < 1000 {
+			f.FwdPacketLengths = append(f.FwdPacketLengths, pktLen)
+		}
+		if !f.LastFwdTime.IsZero() {
+			iat := float64(now.Sub(f.LastFwdTime).Microseconds())
+			if len(f.FwdIATs) < 1000 {
+				f.FwdIATs = append(f.FwdIATs, iat)
+			}
+		}
+		f.LastFwdTime = now
+		f.FwdHeaderLen += uint64(headerLen)
+		if pktLen > 0 {
+			f.ActDataPktFwd++
+		}
+	} else {
+		f.BwdPacketCount++
+		f.BwdByteCount += uint64(pktLen)
+		if len(f.BwdPacketLengths) < 1000 {
+			f.BwdPacketLengths = append(f.BwdPacketLengths, pktLen)
+		}
+		if !f.LastBwdTime.IsZero() {
+			iat := float64(now.Sub(f.LastBwdTime).Microseconds())
+			if len(f.BwdIATs) < 1000 {
+				f.BwdIATs = append(f.BwdIATs, iat)
+			}
+		}
+		f.LastBwdTime = now
+		f.BwdHeaderLen += uint64(headerLen)
+	}
+
+	// ── TCP flags ────────────────────────────────────────────────────────
+	if tcpFlags&0x02 != 0 { f.SYNCount++ }
+	if tcpFlags&0x01 != 0 { f.FINCount++ }
+	if tcpFlags&0x04 != 0 { f.RSTCount++ }
+	if tcpFlags&0x08 != 0 {
+		f.PSHCount++
+		if isClientToServer { f.FwdPSHFlags++ } else { f.BwdPSHFlags++ }
+	}
+	if tcpFlags&0x10 != 0 { f.ACKCount++ }
+	if tcpFlags&0x20 != 0 {
+		f.URGCount++
+		if isClientToServer { f.FwdURGFlags++ } else { f.BwdURGFlags++ }
+	}
+
+	// ── Initial window sizes ─────────────────────────────────────────────
+	if winSize >= 0 {
+		if isClientToServer && !f.InitWinFwdSet {
+			f.InitWinFwd = int32(winSize)
+			f.InitWinFwdSet = true
+		} else if !isClientToServer && !f.InitWinBwdSet {
+			f.InitWinBwd = int32(winSize)
+			f.InitWinBwdSet = true
+		}
+	}
+
+	// ── TCP state machine ────────────────────────────────────────────────
 	if tcpFlags&0x02 != 0 && tcpFlags&0x10 == 0 {
 		f.State = StateNew
 	} else if tcpFlags&0x10 != 0 && f.State == StateNew {
@@ -105,13 +237,19 @@ func (t *Tracker) UpdateFlow(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, payl
 		f.State = StateClosing
 	}
 
-	if len(payload) > 0 {
+	// ── Stream reassembly ────────────────────────────────────────────────
+	if pktLen > 0 {
 		if isClientToServer {
 			f.ClientStream.AddSegment(seq, payload)
 		} else {
 			f.ServerStream.AddSegment(seq, payload)
 		}
 	}
+}
+
+// UpdateFlow is the legacy entry point (for backwards compatibility).
+func (t *Tracker) UpdateFlow(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, payload []byte, seq uint32, tcpFlags uint8) {
+	t.UpdateFlowML(f, pktSrcIP, pktSrcPort, payload, seq, tcpFlags, 0, -1)
 }
 
 // Stats returns current flow tracking statistics.
@@ -137,4 +275,47 @@ func (t *Tracker) pruneLoop() {
 		}
 		t.mu.Unlock()
 	}
+}
+
+// ── Statistical helpers for ML feature extraction ────────────────────────────
+
+func SliceMean(s []float64) float64 {
+	if len(s) == 0 { return 0 }
+	sum := 0.0
+	for _, v := range s { sum += v }
+	return sum / float64(len(s))
+}
+
+func SliceStd(s []float64) float64 {
+	if len(s) < 2 { return 0 }
+	m := SliceMean(s)
+	sum := 0.0
+	for _, v := range s { sum += (v - m) * (v - m) }
+	return math.Sqrt(sum / float64(len(s)))
+}
+
+func SliceMax(s []float64) float64 {
+	if len(s) == 0 { return 0 }
+	mx := s[0]
+	for _, v := range s { if v > mx { mx = v } }
+	return mx
+}
+
+func SliceMin(s []float64) float64 {
+	if len(s) == 0 { return 0 }
+	mn := s[0]
+	for _, v := range s { if v < mn { mn = v } }
+	return mn
+}
+
+func SliceSum(s []float64) float64 {
+	sum := 0.0
+	for _, v := range s { sum += v }
+	return sum
+}
+
+func IntSliceToFloat(s []int) []float64 {
+	out := make([]float64, len(s))
+	for i, v := range s { out[i] = float64(v) }
+	return out
 }

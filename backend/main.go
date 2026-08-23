@@ -28,6 +28,7 @@ func main() {
 	alertLogger, err := alert.NewLogger(cfg.AlertLogPath)
 	if err != nil {
 		fmt.Printf("Warning: could not open alert log: %v\n", err)
+		alertLogger = &alert.Logger{}
 	}
 
 	fmt.Println("====================================")
@@ -61,6 +62,23 @@ func main() {
 	ruleEngine.Build()
 	fmt.Printf("Rule Engine     : READY (Rules loaded: %d)\n", len(ruleEngine.Rules))
 
+	// Setup ML Client
+	mlClient := detection.NewMLClient(cfg.MLServiceURL)
+	mlStatus := "DISCONNECTED (will retry)"
+	if mlClient.IsAvailable() {
+		mlStatus = "CONNECTED"
+	}
+	fmt.Printf("ML Service      : %s (%s)\n", mlStatus, cfg.MLServiceURL)
+
+	// Periodically re-check ML service availability
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			mlClient.RefreshAvailability()
+		}
+	}()
+
 	// Setup Detection Engines (one per worker for lock-free state)
 	workerCount := cfg.WorkerCount
 	if workerCount <= 0 {
@@ -68,7 +86,7 @@ func main() {
 	}
 	var engines []*detection.Engine
 	for i := 0; i < workerCount; i++ {
-		engines = append(engines, detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger))
+		engines = append(engines, detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger, mlClient))
 	}
 
 	// Start packet capture

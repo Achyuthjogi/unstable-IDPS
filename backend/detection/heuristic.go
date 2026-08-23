@@ -54,10 +54,15 @@ type PacketInfo struct {
 	IsTCPSYN bool
 	IsTCPACK bool
 	IsTCPRST     bool
+	IsTCPPSH     bool
+	IsTCPURG     bool
+	IsTCPFIN     bool
 	Seq          uint32
 	ARPOperation uint16
 	Payload      []byte
 	IsDHCPOffer  bool
+	TCPHeaderLen int  // TCP header length in bytes
+	TCPWindow    int  // TCP window size (-1 if not TCP)
 }
 
 func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, alertLogger *alert.Logger, packet PacketInfo) {
@@ -333,6 +338,12 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		effectiveThreshold := udpThresh
 		if len(packet.Payload) > 1000 {
 			effectiveThreshold = udpThresh / 2
+		}
+
+		// Whitelist QUIC (UDP 443) and HTTP3 (UDP 80) from strict flood thresholds
+		// as they legitimately stream large amounts of video data.
+		if packet.DstPort == 443 || packet.SrcPort == 443 || packet.DstPort == 80 || packet.SrcPort == 80 {
+			effectiveThreshold = udpThresh * 50 // Significantly relax threshold for web streaming
 		}
 
 		if udpRate > effectiveThreshold {

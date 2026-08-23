@@ -41,6 +41,9 @@ type Config struct {
 	AlertLogPath  string
 	MaxFlows      int
 	MaxReassembly int
+
+	// ML Service Config
+	MLServiceURL  string
 }
 
 func DiscoverInterfaces() (string, string) {
@@ -111,6 +114,7 @@ func Load() *Config {
 		AlertLogPath:            getEnv("ALERT_LOG_PATH", "alerts.json"),
 		MaxFlows:                getEnvInt("MAX_FLOWS", 100000),
 		MaxReassembly:           getEnvInt("MAX_REASSEMBLY", 65535),
+		MLServiceURL:            getEnv("ML_SERVICE_URL", "http://localhost:5001"),
 	}
 
 	cfg.Interface = getEnv("INTERFACE", cfg.LanInterface)
@@ -176,5 +180,6 @@ func (c *Config) Clone() *Config {
 		AlertLogPath:            c.AlertLogPath,
 		MaxFlows:                c.MaxFlows,
 		MaxReassembly:           c.MaxReassembly,
+		MLServiceURL:            c.MLServiceURL,
 	}
 }

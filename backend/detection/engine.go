@@ -26,6 +26,7 @@ type Engine struct {
 	HTTPInspect  *inspect.HTTPInspector
 	DNSInspect   *inspect.DNSInspector
 	SSHInspect   *inspect.SSHInspector
+	MLClient     *MLClient
 	
 	State        *state.AppState
 	Config       *config.Config
@@ -34,13 +35,14 @@ type Engine struct {
 }
 
 // NewEngine initializes the detection engine.
-func NewEngine(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, re *rules.Engine, alertLogger *alert.Logger) *Engine {
+func NewEngine(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, re *rules.Engine, alertLogger *alert.Logger, mlClient *MLClient) *Engine {
 	return &Engine{
 		Tracker:     flow.NewTracker(100000, 120*time.Second, 65535),
 		RuleEngine:  re,
 		HTTPInspect: &inspect.HTTPInspector{},
 		DNSInspect:  &inspect.DNSInspector{},
 		SSHInspect:  &inspect.SSHInspector{},
+		MLClient:    mlClient,
 		State:       st,
 		Config:      cfg,
 		Firewall:    fm,
@@ -96,8 +98,18 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 	if packet.IsTCPRST {
 		tcpFlags |= 0x04
 	}
+	if packet.IsTCPPSH {
+		tcpFlags |= 0x08
+	}
+	if packet.IsTCPURG {
+		tcpFlags |= 0x20
+	}
+	if packet.IsTCPFIN {
+		tcpFlags |= 0x01
+	}
 
-	e.Tracker.UpdateFlow(f, pktSrc, packet.SrcPort, packet.Payload, packet.Seq, tcpFlags)
+	// Use UpdateFlowML with header length and window size for ML feature extraction
+	e.Tracker.UpdateFlowML(f, pktSrc, packet.SrcPort, packet.Payload, packet.Seq, tcpFlags, packet.TCPHeaderLen, packet.TCPWindow)
 
 	isClientToServer := f.OriginalSrcIP == pktSrc && f.OriginalSrcPort == packet.SrcPort
 
@@ -158,6 +170,51 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 			e.State.Mu.Lock()
 			triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, r.Classtype, severity, "High", packet.SrcIP, packet.DstIP, r.Msg, 1.0, packet.SrcMAC)
 			e.State.Mu.Unlock()
+		}
+	}
+
+	// 5. ML-based anomaly detection (async, throttled per-flow)
+	if e.MLClient != nil && e.MLClient.IsAvailable() {
+		f.Mu.Lock()
+		totalPkts := f.PacketCount
+		now := float64(time.Now().UnixNano()) / 1e9
+		lastCheck := f.LastMLCheck
+		f.Mu.Unlock()
+
+		// Only predict for flows with ≥10 packets, and throttle to once per 5 seconds per flow
+		if totalPkts >= 10 && (now-lastCheck) > 5.0 {
+			f.Mu.Lock()
+			f.LastMLCheck = now
+			f.Mu.Unlock()
+
+			// Fire-and-forget: run ML prediction in a goroutine to avoid blocking the packet pipeline
+			pktSrcIP := packet.SrcIP
+			pktDstIP := packet.DstIP
+			pktDstPort := packet.DstPort
+			pktSrcMAC := packet.SrcMAC
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Printf("engine: recovered from panic during ML prediction: %v\n", r)
+					}
+				}()
+
+				features := ExtractFlowFeatures(f, pktDstPort)
+				resp, err := e.MLClient.Predict(features)
+				if err != nil {
+					// Silently ignore — ML is a best-effort enhancement
+					return
+				}
+
+				if resp.Malicious && resp.Confidence >= 0.7 {
+					ruleID := fmt.Sprintf("ML-%s-001", resp.Prediction)
+					reason := fmt.Sprintf("ML Detection: %s (confidence: %.1f%%)", resp.Prediction, resp.Confidence*100)
+					
+					e.State.Mu.Lock()
+					triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, fmt.Sprintf("ML: %s Detected", resp.Prediction), "High", "High", pktSrcIP, pktDstIP, reason, resp.Confidence, pktSrcMAC)
+					e.State.Mu.Unlock()
+				}
+			}()
 		}
 	}
 }

@@ -308,6 +308,7 @@ func getSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		"WAN_INTERFACE":        api.Config.WanInterface,
 		"LAN_INTERFACE":        api.Config.LanInterface,
 		"INTERFACE":            api.Config.Interface,
+		"GATEWAY_IP":           api.Config.GatewayIP,
 	})
 }
 
@@ -346,6 +347,9 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	}
 	if val, ok := body["INTERFACE"]; ok {
 		api.Config.Interface = val
+	}
+	if val, ok := body["GATEWAY_IP"]; ok {
+		api.Config.GatewayIP = val
 	}
 
 	if api.Config.IDPSDeploymentMode == "GATEWAY" || api.Config.IDPSDeploymentMode == "NETWORK" {

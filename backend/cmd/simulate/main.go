@@ -42,7 +42,7 @@ func main() {
 	fmt.Printf("Loaded %d rules into engine.\n\n", len(ruleEngine.Rules))
 
 	alertLogger, _ := alert.NewLogger("")
-	detEngine := detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger)
+	detEngine := detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger, nil)
 
 	var seq uint32 = 1000
 	var simTime float64 = float64(time.Now().UnixNano()) / 1e9

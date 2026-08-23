@@ -33,7 +33,12 @@ func (h *HTTPInspector) InspectRequest(payload []byte) (string, string, bool) {
 
 	if method == "" {
 		// Not HTTP or invalid method
-		// If it looks like text but not a valid method, could be an anomaly
+		// If it looks like text but not a valid method, check if it's an HTTP response from a server
+		if bytes.HasPrefix(payload, []byte("HTTP/1.")) || bytes.HasPrefix(payload, []byte("HTTP/2.")) {
+			return "RESPONSE", "", false // Benign HTTP response
+		}
+		
+		// If it still contains HTTP/ but doesn't match standard methods or response formats, it's an anomaly
 		if bytes.Contains(payload, []byte("HTTP/")) {
 			return "", "", true // Anomaly: Invalid method
 		}
