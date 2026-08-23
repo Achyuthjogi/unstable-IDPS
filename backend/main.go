@@ -61,11 +61,18 @@ func main() {
 	ruleEngine.Build()
 	fmt.Printf("Rule Engine     : READY (Rules loaded: %d)\n", len(ruleEngine.Rules))
 
-	// Setup Detection Engine
-	detEngine := detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger)
+	// Setup Detection Engines (one per worker for lock-free state)
+	workerCount := cfg.WorkerCount
+	if workerCount <= 0 {
+		workerCount = 4
+	}
+	var engines []*detection.Engine
+	for i := 0; i < workerCount; i++ {
+		engines = append(engines, detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger))
+	}
 
 	// Start packet capture
-	stopCapture, err := capture.StartCapture(appState, cfg, fwManager, detEngine)
+	stopCapture, err := capture.StartCapture(appState, cfg, fwManager, engines)
 	if err != nil {
 		fmt.Printf("Capture setup FAILED:\n  reason: %v\n", err)
 		os.Exit(1)
@@ -144,7 +151,7 @@ func main() {
 		}
 		
 		// Restart capture on new interface
-		stopCapture, err = capture.StartCapture(appState, cfg, fwManager, detEngine)
+		stopCapture, err = capture.StartCapture(appState, cfg, fwManager, engines)
 		if err != nil {
 			fmt.Printf("Capture reload FAILED: %v\n", err)
 			return err

@@ -10,7 +10,7 @@ export default function Dashboard({ data, status }: { data: any, status: string 
 	const [packetHistory, setPacketHistory] = useState<{ time: string, packets: number }[]>([]);
 
 const API_HOST = window.location.hostname;
-const API_BASE = `https://${API_HOST}:8000`;
+const API_BASE = `http://${API_HOST}:8000`;
 const API_KEY = import.meta.env.VITE_API_KEY || '';
   const [showDevicesModal, setShowDevicesModal] = useState(false);
   const [showTrafficModal, setShowTrafficModal] = useState(false);

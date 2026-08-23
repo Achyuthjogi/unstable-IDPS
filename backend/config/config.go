@@ -1,8 +1,6 @@
 package config
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -81,16 +79,13 @@ func Load() *Config {
 		for _, o := range strings.Split(originsStr, ",") {
 			origins = append(origins, strings.TrimSpace(o))
 		}
+	} else {
+		origins = []string{"*"}
 	}
 
-	apiKey := getEnv("API_KEY", "")
-	if apiKey == "" {
-		keyBytes := make([]byte, 32)
-		if _, err := rand.Read(keyBytes); err != nil {
-			panic(fmt.Sprintf("Failed to generate secure API key: %v", err))
-		}
-		apiKey = hex.EncodeToString(keyBytes)
-		fmt.Printf("Generated API key: %s — set API_KEY to persist this across restarts\n", apiKey)
+	apiKey := getEnv("API_KEY", "idps_demo_key")
+	if apiKey == "idps_demo_key" {
+		fmt.Printf("WARNING: Using default API key '%s' — set API_KEY in .env for production\n", apiKey)
 	}
 
 	cfg := &Config{

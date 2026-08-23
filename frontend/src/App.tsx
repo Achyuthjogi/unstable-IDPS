@@ -8,8 +8,8 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { format } from 'date-fns';
 
 const API_HOST = window.location.hostname;
-const API_BASE = `https://${API_HOST}:8000`;
-const WS_URL = `wss://${API_HOST}:8000/ws`;
+const API_BASE = `http://${API_HOST}:8000`;
+const WS_URL = `ws://${API_HOST}:8000/ws`;
 const API_KEY = import.meta.env.VITE_API_KEY || '';
 
 // Error boundary to catch 3D/WebGL crashes

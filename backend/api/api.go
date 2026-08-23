@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	importOS "os"
+
 	"sort"
 	"strings"
 	"time"
@@ -144,8 +144,8 @@ func CreateRouter(apiState *ApiState) http.Handler {
 	apiState.Config.Mu.RUnlock()
 
 	if len(allowedOrigins) == 0 {
-		fmt.Println("FATAL: ALLOWED_ORIGINS is not configured. CORS cannot be established safely. Please configure ALLOWED_ORIGINS or set it to '*' for wildcards (not recommended).")
-		importOS.Exit(1)
+		fmt.Println("WARNING: ALLOWED_ORIGINS is not configured. Defaulting to '*' for wildcards. This is insecure in production!")
+		allowedOrigins = []string{"*"}
 	}
 	for _, o := range allowedOrigins {
 		if o == "*" {
