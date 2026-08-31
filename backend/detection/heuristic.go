@@ -202,7 +202,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 	}
 
 	// ARP Tracking & Heuristics
-	if packet.Protocol == "ARP" && packet.SrcMAC != "" {
+	if packet.Protocol == "ARP" && packet.SrcMAC != "" && srcIP != "0.0.0.0" {
 		// 1. ARP Spoofing / MAC Flip-flop detection
 		macs, exists := st.IPMACMapping[srcIP]
 		if !exists {
@@ -445,19 +445,24 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		}
 
 		// ICMP Sweep
-		sweepMap, exists := st.IPICMPSweep[srcIP]
-		if !exists {
-			sweepMap = make(map[string]float64)
-		}
-		sweepMap[dstIP] = currentTime
-		for dip, t := range sweepMap {
-			if currentTime-t > 10.0 {
-				delete(sweepMap, dip)
+		// Ignore broadcast/multicast pings which are common when joining a network
+		isBroadcastOrMulticast := dstIP == "255.255.255.255" || strings.HasPrefix(dstIP, "224.") || strings.HasPrefix(dstIP, "239.") || strings.HasPrefix(dstIP, "ff02:")
+		
+		if !isBroadcastOrMulticast && dstIP != "N/A" {
+			sweepMap, exists := st.IPICMPSweep[srcIP]
+			if !exists {
+				sweepMap = make(map[string]float64)
 			}
-		}
-		st.IPICMPSweep[srcIP] = sweepMap
-		if len(sweepMap) > 10 { // Ping sweep to >10 hosts in 10s
-			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SWEEP-001", "ICMP Sweep", "Medium", "High", srcIP, dstIP, fmt.Sprintf("ICMP Sweep (%d hosts/10s)", len(sweepMap)), float64(len(sweepMap)), packet.SrcMAC)
+			sweepMap[dstIP] = currentTime
+			for dip, t := range sweepMap {
+				if currentTime-t > 10.0 {
+					delete(sweepMap, dip)
+				}
+			}
+			st.IPICMPSweep[srcIP] = sweepMap
+			if len(sweepMap) > 10 { // Ping sweep to >10 hosts in 10s
+				triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SWEEP-001", "ICMP Sweep", "Medium", "High", srcIP, dstIP, fmt.Sprintf("ICMP Sweep (%d hosts/10s)", len(sweepMap)), float64(len(sweepMap)), packet.SrcMAC)
+			}
 		}
 	}
 
@@ -555,4 +560,39 @@ func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 	}
 
 	st.AddAlert(alert)
+}
+
+// triggerAlertOnly logs an alert without any blocking action.
+// Used for outbound-initiated flows where we don't want to block the remote server.
+// Ensure st.Mu is Locked before calling this function.
+func triggerAlertOnly(st *state.AppState, alertLogger *alert.Logger, currentTime float64, ruleID, alertType, severity, srcIP, dstIP, reason string, rate float64) {
+	throttleKey := srcIP + "_" + ruleID
+	if lastAlert, ok := st.LastAlertTimes[throttleKey]; ok {
+		if currentTime-lastAlert < 30.0 {
+			return
+		}
+	}
+	st.LastAlertTimes[throttleKey] = currentTime
+
+	a := state.Alert{
+		ID:           uuid.New().String(),
+		Timestamp:    currentTime,
+		RuleID:       ruleID,
+		AlertType:    alertType,
+		Severity:     severity,
+		Confidence:   "Medium",
+		SourceIP:     srcIP,
+		DestIP:       dstIP,
+		Reason:       reason,
+		Action:       "ALERT",
+		ActionResult: "SUCCESS",
+		Status:       "LOGGED (OUTBOUND)",
+		Rate:         rate,
+	}
+
+	if alertLogger != nil {
+		alertLogger.Log(a)
+	}
+
+	st.AddAlert(a)
 }

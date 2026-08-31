@@ -7,9 +7,10 @@ The increasing frequency of network attacks requires robust, real-time threat id
 
 ## 🌟 Features
 
-* **Real-Time Traffic Analysis**: Monitors live network packets using `gopacket`.
-* **Rule-Based Threat Detection**: Detects DoS Attacks, SYN Floods, ICMP/UDP Floods, DNS Amplification, Port Scans, ARP Spoofing, and more.
-* **Automated Mitigation**: Enforces prevention by dynamically adding and removing `iptables` rules at the host or inline gateway level to block malicious IPs.
+* **Hybrid Threat Detection**: Combines a lightning-fast rule-based heuristic engine with a Deep Neural Network (DNN) for zero-day anomaly detection.
+* **Real-Time Traffic Analysis**: Monitors live network packets using `gopacket` and dynamically extracts 78 flow features (CICFlowMeter style).
+* **Automated Mitigation**: Enforces prevention by dynamically adding and removing `iptables` and `ebtables` rules at the host or inline gateway level to block malicious IPs.
+* **Machine Learning Microservice**: A dedicated Python FastAPI inference server serving a pre-trained Keras model for advanced traffic classification.
 * **Modern SOC Dashboard**: Dark-themed, beautiful, real-time UI built with React, Recharts, and Framer Motion.
 * **WebSocket Integration**: Instantaneous updates pushed from backend to frontend without polling.
 * **No Database Required**: Fully in-memory state for lightning-fast performance, suitable for college projects or lightweight network monitoring.
@@ -29,11 +30,11 @@ graph TD
         UI <--> WS_Client
     end
 
-    subgraph Backend [Go]
+    subgraph Go Backend [Core Engine]
         API[REST API Routes]
         WS_Server[WebSocket Manager]
         State[(In-Memory State)]
-        Detection[Rule-Based Engine]
+        Detection[Rule-Based Heuristics]
         Capture[gopacket Sniffer]
         WorkerPool[Bounded Worker Pool]
         
@@ -43,7 +44,15 @@ graph TD
         State --> WS_Server
         State --> API
     end
+    
+    subgraph Python Backend [ML Microservice]
+        ML_API[FastAPI Inference]
+        DNN[(Trained Keras Model)]
+        
+        ML_API --> DNN
+    end
 
+    Detection <-->|Feature Extraction & HTTP POST| ML_API
     WS_Client <-->|Real-time metrics & alerts| WS_Server
     Network((Local Network)) --> Capture
 ```
@@ -60,21 +69,19 @@ IDPS/
 │   ├── config/               # Environment configuration
 │   ├── detection/            # Threat detection rules
 │   ├── firewall/             # iptables management
+│   ├── flow/                 # CICFlowMeter style tracking
 │   ├── state/                # In-memory thread-safe state
-│   ├── go.mod                # Go module file
+│   ├── ml_server.py          # Python ML Inference Microservice
 │   └── main.go               # Go entry point
-└── frontend/                 # React Vite Frontend
-    ├── src/
-    │   ├── components/       # Reusable UI components
-    │   │   └── Dashboard.tsx # Main dashboard view
-    │   ├── hooks/
-    │   │   └── useWebSocket.ts # WS connection hook
-    │   ├── App.tsx           # Layout and routing
-    │   ├── index.css         # Tailwind & Shadcn global styles
-    │   └── main.tsx          # React entry point
-    ├── tailwind.config.js    # Tailwind configuration
-    ├── postcss.config.js     # PostCSS configuration
-    └── package.json          # Node dependencies
+├── frontend/                 # React Vite Frontend
+│   ├── src/
+│   │   ├── components/       # Reusable UI components
+│   │   ├── App.tsx           # Layout and routing
+│   │   └── main.tsx          # React entry point
+│   └── package.json          # Node dependencies
+├── idps_model.keras          # Trained Deep Neural Network
+├── idps_scaler.pkl           # Feature Scaler
+└── start_all.sh              # Single-command launch script
 ```
 
 ---
@@ -83,34 +90,47 @@ IDPS/
 
 ### Prerequisites
 * Go 1.20+
+* Python 3.12+ (with `pip` and `venv`)
 * Node.js v20+ (with npm)
 * Linux OS (Ubuntu recommended) for raw socket capture
-* TLS-terminating reverse proxy (Nginx, Caddy) recommended for production
+* `sudo` privileges
 
-### 1. Setup Backend
-Open a terminal and navigate to the project root:
+### Quick Start (Recommended)
+You can start all three services (ML Server, Go Backend, React Frontend) simultaneously using the provided launch script:
+
 ```bash
-# Build the Go binary
-cd backend
-go build -o idps-backend
+# Ensure the script is executable
+chmod +x start_all.sh
 
-# Create a .env file based on the config section below
-# Run the backend with sudo (required for raw packet capture)
-sudo ./idps-backend
+# Run the launch script
+./start_all.sh
 ```
+This script will automatically set up the Python virtual environment, install ML dependencies, launch the React development server, and prompt for `sudo` to run the Go packet sniffer.
 
-### 2. Setup Frontend
-Open a new terminal and navigate to the `frontend` directory:
-```bash
-cd frontend
+### Manual Setup
+If you prefer to run the components manually in separate terminals:
 
-# Install dependencies
-npm install
+1. **Python ML Server:**
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install fastapi uvicorn tensorflow numpy pydantic scikit-learn
+   python backend/ml_server.py
+   ```
 
-# Set VITE_API_KEY in .env to match the backend API_KEY
-# Start the development server or build for production
-npm run dev
-```
+2. **React Frontend:**
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+3. **Go Backend:**
+   ```bash
+   cd backend
+   go build -o idps-backend
+   sudo ./idps-backend
+   ```
 
 ---
 

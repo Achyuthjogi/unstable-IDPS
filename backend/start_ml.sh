@@ -10,34 +10,40 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 VENV_DIR="$PROJECT_ROOT/.venv"
 ML_SERVER="$SCRIPT_DIR/ml_server.py"
-MODEL_PATH="$PROJECT_ROOT/idps_ml_model.pkl"
+MODEL_PATH="$PROJECT_ROOT/idps_model.keras"
+SCALER_PATH="$PROJECT_ROOT/idps_scaler.pkl"
 
 echo "===================================="
 echo "  IDPS ML Service Launcher"
 echo "===================================="
 
-# Check model file exists
+# Check model files exist
 if [ ! -f "$MODEL_PATH" ]; then
     echo "ERROR: Model file not found at $MODEL_PATH"
-    echo "Please place your trained idps_ml_model.pkl in the project root."
+    echo "Please place your trained idps_model.keras in the project root."
     exit 1
+fi
+if [ ! -f "$SCALER_PATH" ]; then
+    echo "WARNING: Scaler file not found at $SCALER_PATH"
+    echo "Inference will fall back to log-scaling. For best results, place idps_scaler.pkl in the project root."
 fi
 
 # Create/activate virtual environment
 if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating Python virtual environment..."
-    python3 -m venv "$VENV_DIR"
+    echo "Creating Python virtual environment using Python 3.12..."
+    python3.12 -m venv "$VENV_DIR"
 fi
 
 echo "Activating virtual environment..."
 source "$VENV_DIR/bin/activate"
 
 # Install dependencies
-echo "Installing dependencies..."
-pip install --quiet fastapi uvicorn scikit-learn joblib numpy
+echo "Installing dependencies (this may take a few minutes)..."
+pip install --default-timeout=1000 --quiet fastapi uvicorn tensorflow numpy pydantic scikit-learn
 
-# Export model path
+# Export model paths
 export ML_MODEL_PATH="$MODEL_PATH"
+export ML_SCALER_PATH="$SCALER_PATH"
 
 echo ""
 echo "Starting ML service..."

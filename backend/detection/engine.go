@@ -174,15 +174,32 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 	}
 
 	// 5. ML-based anomaly detection (async, throttled per-flow)
+	// IMPORTANT: Only run ML detection on INBOUND-initiated flows.
+	// If WE initiated the connection (outbound browsing), the remote server
+	// is NOT an attacker — do not block web servers we are visiting.
 	if e.MLClient != nil && e.MLClient.IsAvailable() {
 		f.Mu.Lock()
 		totalPkts := f.PacketCount
 		now := float64(time.Now().UnixNano()) / 1e9
 		lastCheck := f.LastMLCheck
+		// Determine if this flow was initiated by an external source (inbound)
+		// OriginalSrcIP is the IP that sent the first packet of the flow.
+		flowInitiatorIP := f.OriginalSrcIP
 		f.Mu.Unlock()
 
-		// Only predict for flows with ≥10 packets, and throttle to once per 5 seconds per flow
-		if totalPkts >= 10 && (now-lastCheck) > 5.0 {
+		// Check if the flow initiator is an internal IP.
+		// If the flow was initiated from inside our network (outbound), skip ML blocking.
+		var flowInitiatorIPStr string
+		initIP := net.IP(flowInitiatorIP[:])
+		if initIP.To4() != nil {
+			flowInitiatorIPStr = initIP.To4().String()
+		} else {
+			flowInitiatorIPStr = initIP.String()
+		}
+		isOutboundFlow := isLocalIP(flowInitiatorIPStr)
+
+		// Only predict for INBOUND flows with >=10 packets, and throttle to once per 5 seconds per flow
+		if !isOutboundFlow && totalPkts >= 10 && (now-lastCheck) > 5.0 {
 			f.Mu.Lock()
 			f.LastMLCheck = now
 			f.Mu.Unlock()
@@ -206,10 +223,11 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 					return
 				}
 
-				if resp.Malicious && resp.Confidence >= 0.7 {
+				if resp.Malicious && resp.Confidence >= 0.90 {
 					ruleID := fmt.Sprintf("ML-%s-001", resp.Prediction)
 					reason := fmt.Sprintf("ML Detection: %s (confidence: %.1f%%)", resp.Prediction, resp.Confidence*100)
-					
+
+					// Inbound-initiated flow — this is a real attacker. Block them.
 					e.State.Mu.Lock()
 					triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, fmt.Sprintf("ML: %s Detected", resp.Prediction), "High", "High", pktSrcIP, pktDstIP, reason, resp.Confidence, pktSrcMAC)
 					e.State.Mu.Unlock()
@@ -217,6 +235,25 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 			}()
 		}
 	}
+}
+
+// isLocalIP checks if an IP belongs to this machine's interfaces.
+func isLocalIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	// Check private ranges
+	for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
+		_, block, _ := net.ParseCIDR(cidr)
+		if block.Contains(ip) {
+			return true
+		}
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	return false
 }
 
 func ruleHeaderMatch(r *rules.Rule, proto string, pktSrcIP, pktDstIP string, pktSrcPort, pktDstPort uint16, isClientToServer bool) bool {

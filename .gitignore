@@ -1,6 +1,9 @@
 # Environments
 .env
 .env.*
+.venv/
+venv/
+env/
 
 # Node
 frontend/node_modules/
@@ -25,6 +28,7 @@ backend/coverage.out
 # Python
 __pycache__/
 *.pyc
+.ipynb_checkpoints/
 
 # IDEs and OS
 .vscode/
@@ -39,3 +43,8 @@ backend/alerts.json
 
 # Project specific
 abstract.md
+
+# ML Models & Data (too large for git)
+# *.keras
+# *.pkl
+datasets/
