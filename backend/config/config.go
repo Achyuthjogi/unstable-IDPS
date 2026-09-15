@@ -43,7 +43,8 @@ type Config struct {
 	MaxReassembly int
 
 	// ML Service Config
-	MLServiceURL  string
+	MLServiceURL string
+	MLEnabled    bool
 }
 
 func DiscoverInterfaces() (string, string) {
@@ -115,6 +116,7 @@ func Load() *Config {
 		MaxFlows:                getEnvInt("MAX_FLOWS", 100000),
 		MaxReassembly:           getEnvInt("MAX_REASSEMBLY", 65535),
 		MLServiceURL:            getEnv("ML_SERVICE_URL", "http://localhost:5001"),
+		MLEnabled:               getEnvBool("ML_ENABLED", true),
 	}
 
 	cfg.Interface = getEnv("INTERFACE", cfg.LanInterface)
@@ -181,5 +183,6 @@ func (c *Config) Clone() *Config {
 		MaxFlows:                c.MaxFlows,
 		MaxReassembly:           c.MaxReassembly,
 		MLServiceURL:            c.MLServiceURL,
+		MLEnabled:               c.MLEnabled,
 	}
 }

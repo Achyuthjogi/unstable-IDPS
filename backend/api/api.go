@@ -127,6 +127,14 @@ func CreateRouter(apiState *ApiState) http.Handler {
 		}
 	})
 
+	mux.HandleFunc("/api/ml/toggle", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			toggleML(w, r, apiState)
+			return
+		}
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	})
+
 	mux.HandleFunc("/api/interfaces", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			getInterfaces(w, r, apiState)
@@ -309,11 +317,31 @@ func getSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		"LAN_INTERFACE":        api.Config.LanInterface,
 		"INTERFACE":            api.Config.Interface,
 		"GATEWAY_IP":           api.Config.GatewayIP,
+		"ML_ENABLED":           api.Config.MLEnabled,
+	})
+}
+
+func toggleML(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	api.Config.Mu.Lock()
+	api.Config.MLEnabled = !api.Config.MLEnabled
+	current := api.Config.MLEnabled
+	api.Config.Mu.Unlock()
+
+	statusStr := "disabled"
+	if current {
+		statusStr = "enabled"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "success",
+		"ml_enabled": current,
+		"message":    fmt.Sprintf("Machine learning detection model %s successfully.", statusStr),
 	})
 }
 
 func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
-	var body map[string]string
+	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
@@ -323,7 +351,17 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 
 	api.Config.Mu.Lock()
 
-	if val, ok := body["IDPS_DEPLOYMENT_MODE"]; ok {
+	if val, ok := body["ML_ENABLED"]; ok {
+		switch v := val.(type) {
+		case bool:
+			api.Config.MLEnabled = v
+		case string:
+			lower := strings.ToLower(strings.TrimSpace(v))
+			api.Config.MLEnabled = lower == "true" || lower == "1" || lower == "yes" || lower == "on"
+		}
+	}
+
+	if val, ok := body["IDPS_DEPLOYMENT_MODE"].(string); ok {
 		if val != "HOST" && val != "NETWORK" && val != "GATEWAY" {
 			api.Config.Mu.Unlock()
 			http.Error(w, "Invalid deployment mode", http.StatusBadRequest)
@@ -331,7 +369,7 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		}
 		api.Config.IDPSDeploymentMode = val
 	}
-	if val, ok := body["IDPS_SECURITY_MODE"]; ok {
+	if val, ok := body["IDPS_SECURITY_MODE"].(string); ok {
 		if val != "IDS" && val != "IPS" {
 			api.Config.Mu.Unlock()
 			http.Error(w, "Invalid security mode", http.StatusBadRequest)
@@ -339,16 +377,16 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		}
 		api.Config.IDPSSecurityMode = val
 	}
-	if val, ok := body["WAN_INTERFACE"]; ok {
+	if val, ok := body["WAN_INTERFACE"].(string); ok {
 		api.Config.WanInterface = val
 	}
-	if val, ok := body["LAN_INTERFACE"]; ok {
+	if val, ok := body["LAN_INTERFACE"].(string); ok {
 		api.Config.LanInterface = val
 	}
-	if val, ok := body["INTERFACE"]; ok {
+	if val, ok := body["INTERFACE"].(string); ok {
 		api.Config.Interface = val
 	}
-	if val, ok := body["GATEWAY_IP"]; ok {
+	if val, ok := body["GATEWAY_IP"].(string); ok {
 		api.Config.GatewayIP = val
 	}
 
@@ -358,51 +396,60 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		api.Config.CaptureInterface = api.Config.Interface
 	}
 
-	// Validate interfaces before applying
-	if api.Config.IDPSDeploymentMode == "GATEWAY" || api.Config.IDPSDeploymentMode == "NETWORK" {
-		if _, err := net.InterfaceByName(api.Config.WanInterface); err != nil {
-			api.Config.IDPSDeploymentMode = oldCfg.IDPSDeploymentMode
-			api.Config.IDPSSecurityMode = oldCfg.IDPSSecurityMode
-			api.Config.WanInterface = oldCfg.WanInterface
-			api.Config.LanInterface = oldCfg.LanInterface
-			api.Config.Interface = oldCfg.Interface
-			api.Config.CaptureInterface = oldCfg.CaptureInterface
-			api.Config.Mu.Unlock()
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "WAN interface not found"})
-			return
-		}
-		if _, err := net.InterfaceByName(api.Config.LanInterface); err != nil {
-			api.Config.IDPSDeploymentMode = oldCfg.IDPSDeploymentMode
-			api.Config.IDPSSecurityMode = oldCfg.IDPSSecurityMode
-			api.Config.WanInterface = oldCfg.WanInterface
-			api.Config.LanInterface = oldCfg.LanInterface
-			api.Config.Interface = oldCfg.Interface
-			api.Config.CaptureInterface = oldCfg.CaptureInterface
-			api.Config.Mu.Unlock()
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "LAN interface not found"})
-			return
-		}
-	} else {
-		if _, err := net.InterfaceByName(api.Config.Interface); err != nil {
-			api.Config.IDPSDeploymentMode = oldCfg.IDPSDeploymentMode
-			api.Config.IDPSSecurityMode = oldCfg.IDPSSecurityMode
-			api.Config.WanInterface = oldCfg.WanInterface
-			api.Config.LanInterface = oldCfg.LanInterface
-			api.Config.Interface = oldCfg.Interface
-			api.Config.CaptureInterface = oldCfg.CaptureInterface
-			api.Config.Mu.Unlock()
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "Monitoring interface not found"})
-			return
+	// Validate interfaces before applying IF network capture interface or mode changed
+	needsReload := oldCfg.IDPSDeploymentMode != api.Config.IDPSDeploymentMode ||
+		oldCfg.IDPSSecurityMode != api.Config.IDPSSecurityMode ||
+		oldCfg.WanInterface != api.Config.WanInterface ||
+		oldCfg.LanInterface != api.Config.LanInterface ||
+		oldCfg.Interface != api.Config.Interface ||
+		oldCfg.CaptureInterface != api.Config.CaptureInterface
+
+	if needsReload {
+		if api.Config.IDPSDeploymentMode == "GATEWAY" || api.Config.IDPSDeploymentMode == "NETWORK" {
+			if _, err := net.InterfaceByName(api.Config.WanInterface); err != nil {
+				api.Config.IDPSDeploymentMode = oldCfg.IDPSDeploymentMode
+				api.Config.IDPSSecurityMode = oldCfg.IDPSSecurityMode
+				api.Config.WanInterface = oldCfg.WanInterface
+				api.Config.LanInterface = oldCfg.LanInterface
+				api.Config.Interface = oldCfg.Interface
+				api.Config.CaptureInterface = oldCfg.CaptureInterface
+				api.Config.Mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "WAN interface not found"})
+				return
+			}
+			if _, err := net.InterfaceByName(api.Config.LanInterface); err != nil {
+				api.Config.IDPSDeploymentMode = oldCfg.IDPSDeploymentMode
+				api.Config.IDPSSecurityMode = oldCfg.IDPSSecurityMode
+				api.Config.WanInterface = oldCfg.WanInterface
+				api.Config.LanInterface = oldCfg.LanInterface
+				api.Config.Interface = oldCfg.Interface
+				api.Config.CaptureInterface = oldCfg.CaptureInterface
+				api.Config.Mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "LAN interface not found"})
+				return
+			}
+		} else {
+			if _, err := net.InterfaceByName(api.Config.Interface); err != nil {
+				api.Config.IDPSDeploymentMode = oldCfg.IDPSDeploymentMode
+				api.Config.IDPSSecurityMode = oldCfg.IDPSSecurityMode
+				api.Config.WanInterface = oldCfg.WanInterface
+				api.Config.LanInterface = oldCfg.LanInterface
+				api.Config.Interface = oldCfg.Interface
+				api.Config.CaptureInterface = oldCfg.CaptureInterface
+				api.Config.Mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "Monitoring interface not found"})
+				return
+			}
 		}
 	}
 	
 	api.Config.Mu.Unlock()
 
-	// Trigger hot-reload in main
-	if api.Reload != nil {
+	// Trigger hot-reload in main ONLY if network interfaces or deployment modes changed
+	if needsReload && api.Reload != nil {
 		if err := api.Reload(oldCfg); err != nil {
 			// Rollback config
 			api.Config.Mu.Lock()
@@ -440,6 +487,7 @@ func getInterfaces(w http.ResponseWriter, r *http.Request, api *ApiState) {
 func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	api.Config.Mu.RLock()
 	allowedOrigins := api.Config.AllowedOrigins
+	apiKey := api.Config.APIKey
 	api.Config.Mu.RUnlock()
 
 	upgrader := websocket.Upgrader{
@@ -455,7 +503,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 			}
 			return false
 		},
-		Subprotocols: []string{api.Config.APIKey}, // Allow the API key as a subprotocol
+		Subprotocols: []string{apiKey}, // Allow the API key as a subprotocol
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -600,6 +648,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 			topDstPorts = make([]portCount, 0)
 		}
 
+		api.Config.Mu.RLock()
+		mlEnabled := api.Config.MLEnabled
+		gatewayIP := api.Config.GatewayIP
+		api.Config.Mu.RUnlock()
+
 		// --- Build JSON payload ---
 
 		data := map[string]interface{}{
@@ -607,6 +660,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 				"cpu":                cpuUsage,
 				"memory":             memUsage,
 				"active_connections": activeConns,
+				"ml_enabled":         mlEnabled,
+				"gateway_ip":         gatewayIP,
 			},
 			"network": map[string]interface{}{
 				"packet_count":      packetCount,

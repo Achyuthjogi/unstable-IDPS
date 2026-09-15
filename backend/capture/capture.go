@@ -52,6 +52,7 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 			for _, h := range handles {
 				h.Close()
 			}
+			cancel()
 			return nil, fmt.Errorf("failed to open afpacket on %s: %w", ifaceName, err)
 		}
 
@@ -61,6 +62,7 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 				h.Close()
 			}
 			handle.Close()
+			cancel()
 			return nil, fmt.Errorf("failed to set fanout hash: %w", err)
 		}
 

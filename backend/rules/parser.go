@@ -66,7 +66,7 @@ func ParseRule(line string) (*Rule, error) {
 		} else if opt.Key == "content" {
 			contentVal := strings.Trim(opt.Value, `"`)
 			parsedContent, err := ParseHexContent(contentVal)
-			if err == nil {
+			if err == nil && len(parsedContent) > 0 {
 				c := ContentMatch{
 					Pattern: parsedContent,
 					Modifier: ContentModifier{
@@ -128,19 +128,25 @@ type option struct {
 	Value string
 }
 
-// parseOptions naively splits the rule body options.
-// A real parser would handle escaped semicolons and quotes properly.
+// parseOptions splits rule body options, properly handling quotes and escaped characters.
 func parseOptions(bodyStr string) []option {
 	var opts []option
 	
-	// Custom split to handle escaped semicolons (\;)
 	var parts []string
 	var current strings.Builder
+	inQuote := false
 	for i := 0; i < len(bodyStr); i++ {
-		if bodyStr[i] == '\\' && i+1 < len(bodyStr) && bodyStr[i+1] == ';' {
-			current.WriteByte(';')
-			i++ // skip the escaped semicolon
-		} else if bodyStr[i] == ';' {
+		if bodyStr[i] == '\\' && i+1 < len(bodyStr) {
+			if bodyStr[i+1] == ';' || bodyStr[i+1] == '"' {
+				current.WriteByte(bodyStr[i+1])
+				i++ // skip the escaped character
+				continue
+			}
+		}
+		if bodyStr[i] == '"' {
+			inQuote = !inQuote
+			current.WriteByte('"')
+		} else if bodyStr[i] == ';' && !inQuote {
 			parts = append(parts, current.String())
 			current.Reset()
 		} else {

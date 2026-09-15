@@ -14,24 +14,24 @@ import (
 	"idps-backend/inspect"
 	"idps-backend/rules"
 	"idps-backend/state"
-	
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
 
 // Engine is the central detection coordinator.
 type Engine struct {
-	Tracker      *flow.Tracker
-	RuleEngine   *rules.Engine
-	HTTPInspect  *inspect.HTTPInspector
-	DNSInspect   *inspect.DNSInspector
-	SSHInspect   *inspect.SSHInspector
-	MLClient     *MLClient
-	
-	State        *state.AppState
-	Config       *config.Config
-	Firewall     *firewall.FirewallManager
-	AlertLogger  *alert.Logger
+	Tracker     *flow.Tracker
+	RuleEngine  *rules.Engine
+	HTTPInspect *inspect.HTTPInspector
+	DNSInspect  *inspect.DNSInspector
+	SSHInspect  *inspect.SSHInspector
+	MLClient    *MLClient
+
+	State       *state.AppState
+	Config      *config.Config
+	Firewall    *firewall.FirewallManager
+	AlertLogger *alert.Logger
 }
 
 // NewEngine initializes the detection engine.
@@ -139,7 +139,7 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 		}()
 	}
 
-	// 4. Rule Evaluation (on reassembled stream)
+	// 4. Rule Evaluation (on reassembled stream or packet payload fallback)
 	var searchPayload []byte
 	f.Mu.Lock()
 	if isClientToServer {
@@ -151,9 +151,22 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 	}
 	f.Mu.Unlock()
 
-	if len(searchPayload) > 0 && e.RuleEngine != nil {
+	// If stream reassembly buffer is empty, fall back to current packet payload
+	if len(searchPayload) == 0 && len(packet.Payload) > 0 {
+		searchPayload = packet.Payload
+	}
+
+	if e.RuleEngine != nil {
 		matchedRules := e.RuleEngine.Match(searchPayload)
 		for _, r := range matchedRules {
+			// Cleartext credentials on the configured gateway admin endpoint
+			// are expected management traffic, not an inbound attack.
+			e.Config.Mu.RLock()
+			gatewayIP := e.Config.GatewayIP
+			e.Config.Mu.RUnlock()
+			if r.SID == 1000601 && gatewayIP != "" && packet.DstIP == gatewayIP {
+				continue
+			}
 			if !ruleHeaderMatch(r, packet.Protocol, packet.SrcIP, packet.DstIP, packet.SrcPort, packet.DstPort, isClientToServer) {
 				continue
 			}
@@ -164,9 +177,9 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 			} else if r.Priority == 2 {
 				severity = "High"
 			}
-			
+
 			ruleID := fmt.Sprintf("SID-%d", r.SID)
-			
+
 			e.State.Mu.Lock()
 			triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, r.Classtype, severity, "High", packet.SrcIP, packet.DstIP, r.Msg, 1.0, packet.SrcMAC)
 			e.State.Mu.Unlock()
@@ -177,7 +190,11 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 	// IMPORTANT: Only run ML detection on INBOUND-initiated flows.
 	// If WE initiated the connection (outbound browsing), the remote server
 	// is NOT an attacker — do not block web servers we are visiting.
-	if e.MLClient != nil && e.MLClient.IsAvailable() {
+	e.Config.Mu.RLock()
+	mlEnabled := e.Config.MLEnabled
+	e.Config.Mu.RUnlock()
+
+	if mlEnabled && e.MLClient != nil && e.MLClient.IsAvailable() {
 		f.Mu.Lock()
 		totalPkts := f.PacketCount
 		now := float64(time.Now().UnixNano()) / 1e9
@@ -205,10 +222,13 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 			f.Mu.Unlock()
 
 			// Fire-and-forget: run ML prediction in a goroutine to avoid blocking the packet pipeline
-			pktSrcIP := packet.SrcIP
 			pktDstIP := packet.DstIP
 			pktDstPort := packet.DstPort
 			pktSrcMAC := packet.SrcMAC
+			attackerIP := flowInitiatorIPStr
+			if attackerIP == "" {
+				attackerIP = packet.SrcIP
+			}
 			go func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -229,7 +249,7 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 
 					// Inbound-initiated flow — this is a real attacker. Block them.
 					e.State.Mu.Lock()
-					triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, fmt.Sprintf("ML: %s Detected", resp.Prediction), "High", "High", pktSrcIP, pktDstIP, reason, resp.Confidence, pktSrcMAC)
+					triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, fmt.Sprintf("ML: %s Detected", resp.Prediction), "High", "High", attackerIP, pktDstIP, reason, resp.Confidence, pktSrcMAC)
 					e.State.Mu.Unlock()
 				}
 			}()
@@ -260,7 +280,7 @@ func ruleHeaderMatch(r *rules.Rule, proto string, pktSrcIP, pktDstIP string, pkt
 	if r.Protocol != "ip" && r.Protocol != "any" && strings.ToLower(r.Protocol) != strings.ToLower(proto) {
 		return false
 	}
-	
+
 	matchForward := ipMatch(r.SrcNet, pktSrcIP) && ipMatch(r.DstNet, pktDstIP) && portMatch(r.SrcPort, pktSrcPort) && portMatch(r.DstPort, pktDstPort)
 	if matchForward {
 		return true
@@ -277,38 +297,113 @@ func ruleHeaderMatch(r *rules.Rule, proto string, pktSrcIP, pktDstIP string, pkt
 }
 
 func ipMatch(ruleNet, pktIP string) bool {
+	ruleNet = strings.TrimSpace(ruleNet)
 	if ruleNet == "any" || ruleNet == "" {
 		return true
 	}
+	// Snort variable expansion
+	if strings.EqualFold(ruleNet, "$EXTERNAL_NET") {
+		// In an IDPS, threats can originate from external WAN or untrusted LAN hosts.
+		// Standard Snort rules default EXTERNAL_NET to "any" to inspect all inbound traffic.
+		return true
+	}
+	if strings.EqualFold(ruleNet, "$HOME_NET") {
+		// Matches private RFC1918 subnets, loopback, or local host interfaces
+		return isInternalIP(pktIP) || isLocalIP(pktIP)
+	}
+
+	// Check for negation e.g. "!$HOME_NET"
+	negate := false
+	if strings.HasPrefix(ruleNet, "!") {
+		negate = true
+		ruleNet = strings.TrimPrefix(ruleNet, "!")
+		if strings.EqualFold(ruleNet, "$HOME_NET") {
+			res := !isInternalIP(pktIP) && !isLocalIP(pktIP)
+			if negate {
+				return res
+			}
+			return !res
+		}
+	}
+
 	// Check for CIDR
 	if strings.Contains(ruleNet, "/") {
 		_, ipNet, err := net.ParseCIDR(ruleNet)
 		if err == nil && ipNet != nil {
 			parsedIP := net.ParseIP(pktIP)
-			if parsedIP != nil && ipNet.Contains(parsedIP) {
-				return true
+			res := parsedIP != nil && ipNet.Contains(parsedIP)
+			if negate {
+				return !res
 			}
-			return false
+			return res
 		}
 	}
 	// Exact IP match
-	return ruleNet == pktIP
+	res := ruleNet == pktIP
+	if negate {
+		return !res
+	}
+	return res
 }
 
-// TODO: Full Snort-style variable expansion ($HTTP_PORTS, $HOME_NET, $EXTERNAL_NET) is not yet implemented
+var httpPorts = map[uint16]bool{
+	80:   true,
+	8080: true,
+	8000: true,
+	8888: true,
+	3000: true,
+	5000: true,
+	8008: true,
+}
+
 func portMatch(rulePort string, pktPort uint16) bool {
+	rulePort = strings.TrimSpace(rulePort)
 	if rulePort == "any" || rulePort == "" {
 		return true
 	}
-	// Basic parsing: doesn't handle port ranges (like 1024:65535) or negation (!80) for this MVP
-	p, err := strconv.Atoi(rulePort)
+
+	// Snort port variables
+	if strings.EqualFold(rulePort, "$HTTP_PORTS") {
+		return httpPorts[pktPort]
+	}
+
+	// Handle bracketed or comma-separated lists e.g. [80, 8080, 8000]
+	cleanPort := strings.Trim(rulePort, "[]")
+	if strings.Contains(cleanPort, ",") {
+		for _, part := range strings.Split(cleanPort, ",") {
+			if portMatch(strings.TrimSpace(part), pktPort) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Handle port ranges e.g. 1024:65535 or :1024 or 1024:
+	if strings.Contains(cleanPort, ":") {
+		parts := strings.Split(cleanPort, ":")
+		if len(parts) == 2 {
+			minPort := 0
+			maxPort := 65535
+			if parts[0] != "" {
+				if p, err := strconv.Atoi(strings.TrimSpace(parts[0])); err == nil {
+					minPort = p
+				}
+			}
+			if parts[1] != "" {
+				if p, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+					maxPort = p
+				}
+			}
+			return int(pktPort) >= minPort && int(pktPort) <= maxPort
+		}
+	}
+
+	p, err := strconv.Atoi(cleanPort)
 	if err == nil {
 		return pktPort == uint16(p)
 	}
-	// Need variable expansion like $HTTP_PORTS here in a real implementation.
-	// For now, unsupported specifications are treated as fail-closed.
-	fmt.Printf("Warning: Unsupported port specification '%s' evaluated as fail-closed\n", rulePort)
-	return false 
+
+	return false
 }
 
 func (e *Engine) triggerRuleAlert(srcIP, dstIP, msg, classType string, priority int, ruleID string, srcMAC string) {

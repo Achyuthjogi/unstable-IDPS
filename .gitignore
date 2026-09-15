@@ -43,6 +43,10 @@ backend/alerts.json
 
 # Project specific
 abstract.md
+ATTACKS.md
+*.ipynb
+backend/package-lock.json
+backend/cmd/test_false_positives/
 
 # ML Models & Data (too large for git)
 # *.keras

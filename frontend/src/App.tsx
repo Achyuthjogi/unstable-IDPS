@@ -1,7 +1,7 @@
 import { useState, useEffect, Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
-import { Shield, Activity, AlertTriangle, ShieldOff, Settings, Network, AlertOctagon, Ban } from 'lucide-react';
+import { Shield, Activity, AlertTriangle, ShieldOff, Settings, Network, AlertOctagon, Ban, Box, BrainCircuit } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import ThreeDBackground from './components/ThreeDBackground';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -35,11 +35,12 @@ class SafeBackground extends Component<{children: ReactNode}, {hasError: boolean
 function App() {
   const [activeTab, setActiveTab] = useState(window.location.pathname.replace('/', '') || 'overview');
   const { data, status } = useWebSocket(WS_URL, API_KEY ? [API_KEY] : undefined);
+  const [enable3D, setEnable3D] = useState(true);
 
   return (
     <Router>
       <div className="flex h-screen bg-transparent overflow-hidden text-foreground selection:bg-primary selection:text-primary-foreground relative z-10">
-        <SafeBackground><ThreeDBackground /></SafeBackground>
+        {enable3D && <SafeBackground><ThreeDBackground /></SafeBackground>}
         {/* Sidebar */}
         <aside className="w-64 kinetic-card z-10 flex flex-col rounded-r-2xl my-4 ml-4">
           <div className="p-6 flex items-center gap-3">
@@ -57,12 +58,21 @@ function App() {
             <NavItem icon={<Settings />} label="Settings" path="/settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
           </nav>
           
-          <div className="p-4 border-t border-border text-xs text-muted-foreground flex justify-between items-center">
-            <span>v1.0.0</span>
-            <span className="flex items-center gap-1">
-              <span className={`w-2 h-2 rounded-full ${status === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
-              {status === 'connected' ? 'System Active' : 'Disconnected'}
-            </span>
+          <div className="p-4 border-t border-border text-xs text-muted-foreground flex flex-col gap-3">
+            <div className="flex justify-between items-center">
+              <span>v1.0.0</span>
+              <span className="flex items-center gap-1">
+                <span className={`w-2 h-2 rounded-full ${status === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
+                {status === 'connected' ? 'System Active' : 'Disconnected'}
+              </span>
+            </div>
+            <button 
+              onClick={() => setEnable3D(!enable3D)}
+              className="w-full kinetic-card hover:bg-white/5 border border-border/10 px-3 py-2 rounded-lg text-xs transition-all font-medium flex justify-center items-center gap-2"
+            >
+              <Box className="w-4 h-4" />
+              {enable3D ? 'Disable 3D UI' : 'Enable 3D UI'}
+            </button>
           </div>
         </aside>
 
@@ -224,10 +234,12 @@ function SettingsView() {
     IDPS_SECURITY_MODE: 'IDS',
     WAN_INTERFACE: 'enx2a7345453743',
     LAN_INTERFACE: 'wlp1s0',
-    INTERFACE: 'wlp1s0'
+    INTERFACE: 'wlp1s0',
+    ML_ENABLED: true
   });
   const [interfaces, setInterfaces] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  const [togglingML, setTogglingML] = useState(false);
   const [message, setMessage] = useState('');
 
   // Fetch current settings on mount
@@ -240,7 +252,8 @@ function SettingsView() {
           IDPS_SECURITY_MODE: data.IDPS_SECURITY_MODE || 'IDS',
           WAN_INTERFACE: data.WAN_INTERFACE || 'enx2a7345453743',
           LAN_INTERFACE: data.LAN_INTERFACE || 'wlp1s0',
-          INTERFACE: data.INTERFACE || 'wlp1s0'
+          INTERFACE: data.INTERFACE || 'wlp1s0',
+          ML_ENABLED: data.ML_ENABLED !== false
         });
       })
       .catch(console.error);
@@ -250,6 +263,25 @@ function SettingsView() {
       .then(data => setInterfaces(data))
       .catch(console.error);
   }, []);
+
+  const handleToggleML = async () => {
+    setTogglingML(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/ml/toggle`, {
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY }
+      });
+      const data = await res.json();
+      setSettings(prev => ({ ...prev, ML_ENABLED: data.ml_enabled }));
+      setMessage(data.message || `ML model is now ${data.ml_enabled ? 'enabled' : 'disabled'}.`);
+      setTimeout(() => setMessage(''), 3000);
+    } catch {
+      setMessage('Failed to toggle ML model.');
+      setTimeout(() => setMessage(''), 3000);
+    } finally {
+      setTogglingML(false);
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -280,6 +312,56 @@ function SettingsView() {
         <h2 className="text-3xl font-bold">System Settings</h2>
       </div>
       <div className="kinetic-card rounded-2xl p-6 space-y-6">
+        {/* Machine Learning Model Control Card */}
+        <div className="p-6 rounded-xl kinetic-card border border-purple-500/20 bg-gradient-to-r from-purple-500/10 via-transparent to-primary/5 shadow-[0_0_20px_rgba(168,85,247,0.1)]">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-4">
+              <div className={`p-3 rounded-xl kinetic-card transition-colors ${
+                settings.ML_ENABLED ? 'bg-purple-500/20 text-purple-400 border border-purple-500/40 shadow-[0_0_15px_rgba(168,85,247,0.3)]' : 'bg-white/5 text-muted-foreground border border-border/20'
+              }`}>
+                <BrainCircuit className={`w-6 h-6 ${settings.ML_ENABLED ? 'animate-pulse text-purple-400' : 'text-muted-foreground'}`} />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-lg font-bold">AI / Machine Learning Detection Engine</h3>
+                  <span className={`px-2.5 py-0.5 text-xs font-semibold rounded-full border transition-all ${
+                    settings.ML_ENABLED
+                      ? 'bg-purple-500/20 text-purple-300 border-purple-500/40 shadow-[0_0_10px_rgba(168,85,247,0.2)]'
+                      : 'bg-muted/40 text-muted-foreground border-border/40'
+                  }`}>
+                    {settings.ML_ENABLED ? 'ACTIVE / INSPECTING' : 'DISABLED / BYPASSED'}
+                  </span>
+                </div>
+                <p className="text-sm text-muted-foreground mt-1 max-w-2xl leading-relaxed">
+                  Deep Neural Network (DNN) traffic classifier analyzing flow durations, packet counts, and inter-arrival timing to detect zero-day anomalies in real time. Turn OFF if running on resource-constrained hardware to bypass Python inference calls.
+                </p>
+              </div>
+            </div>
+
+            {/* Kinetic Toggle Switch */}
+            <div className="flex items-center gap-3 self-end sm:self-center">
+              <span className={`text-xs font-mono font-semibold transition-colors ${settings.ML_ENABLED ? 'text-purple-400' : 'text-muted-foreground'}`}>
+                {settings.ML_ENABLED ? 'MODEL ON' : 'MODEL OFF'}
+              </span>
+              <button
+                type="button"
+                onClick={handleToggleML}
+                disabled={togglingML}
+                className={`relative inline-flex h-8 w-16 items-center rounded-full transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-purple-500/50 ${
+                  settings.ML_ENABLED ? 'bg-purple-600 shadow-[0_0_18px_rgba(168,85,247,0.5)]' : 'bg-neutral-800 border border-border/20'
+                } ${togglingML ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                title={`Click to turn ML model ${settings.ML_ENABLED ? 'OFF' : 'ON'}`}
+              >
+                <span
+                  className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform duration-300 shadow-md ${
+                    settings.ML_ENABLED ? 'translate-x-9' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+        </div>
+
         <div>
           <h3 className="text-xl font-bold mb-4 text-primary flex items-center gap-2">
             <Network className="w-5 h-5" /> 

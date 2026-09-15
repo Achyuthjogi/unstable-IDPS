@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-import { Activity, AlertOctagon, ShieldAlert, Cpu, Network, ArrowUpRight, Ban, X, Monitor, Maximize, Search, Filter } from 'lucide-react';
+import { Activity, AlertOctagon, ShieldAlert, Cpu, Network, ArrowUpRight, Ban, X, Monitor, Maximize, Search, Filter, BrainCircuit } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Cell } from 'recharts';
 import { format } from 'date-fns';
 
@@ -89,6 +89,20 @@ const API_KEY = import.meta.env.VITE_API_KEY || '';
           <div className="flex items-center gap-2 text-sm" title="Gateway IP Address">
             <Network className="w-4 h-4 text-muted-foreground" />
             <span className="font-mono">{system.gateway_ip || 'Unknown IP'}</span>
+          </div>
+          <div className="w-px h-6 bg-border" />
+          <div 
+            className="flex items-center gap-2 text-sm" 
+            title={system.ml_enabled !== false ? 'AI/DNN Model Active: Inbound flows analyzed for zero-day anomalies' : 'AI/DNN Model Disabled: ML inference bypassed'}
+          >
+            <BrainCircuit className={`w-4 h-4 ${system.ml_enabled !== false ? 'text-purple-400 animate-pulse' : 'text-muted-foreground'}`} />
+            <span className={`px-2 py-0.5 text-xs font-semibold rounded-full border ${
+              system.ml_enabled !== false 
+                ? 'bg-purple-500/20 text-purple-400 border-purple-500/30' 
+                : 'bg-muted/40 text-muted-foreground border-border/30'
+            }`}>
+              ML: {system.ml_enabled !== false ? 'Active' : 'Disabled'}
+            </span>
           </div>
         </div>
       </div>

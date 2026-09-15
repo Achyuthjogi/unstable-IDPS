@@ -17,8 +17,9 @@ func (h *HTTPInspector) InspectRequest(payload []byte) (string, string, bool) {
 
 	// Fast check for HTTP methods
 	methods := [][]byte{
-		[]byte("GET "), []byte("POST "), []byte("PUT "), 
+		[]byte("GET "), []byte("POST "), []byte("PUT "),
 		[]byte("DELETE "), []byte("HEAD "), []byte("OPTIONS "),
+		[]byte("PATCH "),
 	}
 
 	var method string
@@ -37,7 +38,7 @@ func (h *HTTPInspector) InspectRequest(payload []byte) (string, string, bool) {
 		if bytes.HasPrefix(payload, []byte("HTTP/1.")) || bytes.HasPrefix(payload, []byte("HTTP/2.")) {
 			return "RESPONSE", "", false // Benign HTTP response
 		}
-		
+
 		// If it still contains HTTP/ but doesn't match standard methods or response formats, it's an anomaly
 		if bytes.Contains(payload, []byte("HTTP/")) {
 			return "", "", true // Anomaly: Invalid method
@@ -51,13 +52,33 @@ func (h *HTTPInspector) InspectRequest(payload []byte) (string, string, bool) {
 	if end == -1 {
 		return method, "", true // Anomaly: Malformed request line
 	}
-	
+
 	uri := string(payload[start : start+end])
 
-	// Basic path traversal anomaly check
-	if strings.Contains(uri, "../") || strings.Contains(uri, "..\\") {
+	// Alert only when traversal escapes the URI root. Relative paths such as
+	// /static/css/../images/logo.png are normal browser requests.
+	if escapesURIRoot(uri) {
 		return method, uri, true
 	}
 
 	return method, uri, false
+}
+
+func escapesURIRoot(uri string) bool {
+	uri = strings.ReplaceAll(uri, `\`, "/")
+	depth := 0
+	for _, segment := range strings.Split(uri, "/") {
+		switch segment {
+		case "", ".":
+			continue
+		case "..":
+			if depth == 0 {
+				return true
+			}
+			depth--
+		default:
+			depth++
+		}
+	}
+	return false
 }

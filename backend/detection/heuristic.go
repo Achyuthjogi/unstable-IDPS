@@ -44,15 +44,15 @@ func getTimestamp() float64 {
 }
 
 type PacketInfo struct {
-	SrcIP    string
-	DstIP    string
-	SrcMAC   string
-	DstMAC   string
-	Protocol string
-	SrcPort  uint16
-	DstPort  uint16
-	IsTCPSYN bool
-	IsTCPACK bool
+	SrcIP        string
+	DstIP        string
+	SrcMAC       string
+	DstMAC       string
+	Protocol     string
+	SrcPort      uint16
+	DstPort      uint16
+	IsTCPSYN     bool
+	IsTCPACK     bool
 	IsTCPRST     bool
 	IsTCPPSH     bool
 	IsTCPURG     bool
@@ -61,8 +61,8 @@ type PacketInfo struct {
 	ARPOperation uint16
 	Payload      []byte
 	IsDHCPOffer  bool
-	TCPHeaderLen int  // TCP header length in bytes
-	TCPWindow    int  // TCP window size (-1 if not TCP)
+	TCPHeaderLen int // TCP header length in bytes
+	TCPWindow    int // TCP window size (-1 if not TCP)
 }
 
 func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, alertLogger *alert.Logger, packet PacketInfo) {
@@ -107,7 +107,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 				device.IP = srcIP
 			}
 		}
-		
+
 		st.GlobalMACsSeen[packet.SrcMAC] = currentTime
 		recentMACs := 0
 		for mac, t := range st.GlobalMACsSeen {
@@ -120,7 +120,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		if recentMACs > 100 { // 100 unique MACs in 1 second
 			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-MAC-001", "MAC Flooding", "Critical", "High", srcIP, dstIP, fmt.Sprintf("MAC Flood / CAM Exhaustion (%d MACs/sec)", recentMACs), float64(recentMACs), packet.SrcMAC)
 		}
-		
+
 		st.Mu.Unlock()
 	}
 
@@ -134,7 +134,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 			// Attacker changed IP (e.g. DHCP renew). Re-block immediately!
 			st.Mu.RUnlock()
 			fm.BlockDevice(srcIP, packet.SrcMAC, cfg)
-			
+
 			st.Mu.Lock()
 			st.BlockedIPs[srcIP] = state.IPBlock{
 				IP:         srcIP,
@@ -218,7 +218,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		st.IPMACMapping[srcIP] = macs
 
 		macCount := len(macs)
-		if macCount > 1 {
+		if packet.ARPOperation == 2 && macCount > 2 {
 			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-ARP-001", "Duplicate IP / ARP Spoofing", "Medium", "High", srcIP, dstIP, fmt.Sprintf("Heuristic ARP Spoofing (%d MACs)", macCount), float64(macCount), packet.SrcMAC)
 		}
 
@@ -262,7 +262,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 					}
 				}
 				st.IPPortsAccessed[portKey] = ports
-				if len(ports) > 3 {
+				if len(ports) > 10 {
 					triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-LAT-001", "Abnormal Lateral Movement", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Lateral Movement Scan (%d internal hosts/min)", len(ports)), float64(len(ports)), packet.SrcMAC)
 				}
 			}
@@ -293,11 +293,12 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 			if !exists {
 				synTs = make([]float64, 0, 5000)
 			}
-			synRate := addTimestamp(&synTs, currentTime)
+			addTimestamp(&synTs, currentTime)
 			st.IPSYNTimestamps[srcIP] = synTs
 
-			if synRate > synThresh && uniquePortsRate <= 5 {
-				triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SYN-001", "SYN Flood", "High", "High", srcIP, dstIP, fmt.Sprintf("SYN Flood (%d pkts/s)", synRate), float64(synRate), packet.SrcMAC)
+			if len(synTs) >= synThresh && uniquePortsRate <= 5 {
+				rate := float64(len(synTs)) / 3.0
+				triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-SYN-001", "SYN Flood", "High", "High", srcIP, dstIP, fmt.Sprintf("SYN Flood (%d packets/3s, %.1f pkts/s)", len(synTs), rate), rate, packet.SrcMAC)
 			}
 
 			// SSH Brute Force
@@ -389,7 +390,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 				triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-001", "DNS Amplification", "High", "Medium", srcIP, dstIP, fmt.Sprintf("Heuristic DNS Amplification (%d pkts/s)", dnsRate), float64(dnsRate), packet.SrcMAC)
 			}
 		}
-		
+
 		if packet.SrcPort == 53 || packet.DstPort == 53 {
 			// DNS Tunneling and Spoofing
 			// Decoding DNS payload manually for heuristics
@@ -418,7 +419,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 						triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-003", "DNS Spoofing", "Critical", "High", srcIP, dstIP, fmt.Sprintf("DNS Reply from unauthorized internal host %s", srcIP), 1.0, packet.SrcMAC)
 					}
 					// Simple check for large TXT replies could be added here by parsing the answers, but keeping it simple.
-					if len(packet.Payload) > 1000 {
+					if len(packet.Payload) > 4096 {
 						triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-DNS-002", "DNS Tunneling", "High", "Medium", srcIP, dstIP, "Unusually large DNS reply payload", 1.0, packet.SrcMAC)
 					}
 				}
@@ -440,14 +441,14 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		}
 
 		// Ping of Death
-		if len(packet.Payload) > 1000 {
+		if len(packet.Payload) > 65535 {
 			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-POD-001", "Ping of Death", "Critical", "High", srcIP, dstIP, fmt.Sprintf("Oversized ICMP (%d bytes)", len(packet.Payload)), 1.0, packet.SrcMAC)
 		}
 
 		// ICMP Sweep
 		// Ignore broadcast/multicast pings which are common when joining a network
 		isBroadcastOrMulticast := dstIP == "255.255.255.255" || strings.HasPrefix(dstIP, "224.") || strings.HasPrefix(dstIP, "239.") || strings.HasPrefix(dstIP, "ff02:")
-		
+
 		if !isBroadcastOrMulticast && dstIP != "N/A" {
 			sweepMap, exists := st.IPICMPSweep[srcIP]
 			if !exists {

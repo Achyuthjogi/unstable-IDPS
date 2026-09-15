@@ -13,6 +13,7 @@ The increasing frequency of network attacks requires robust, real-time threat id
 * **Machine Learning Microservice**: A dedicated Python FastAPI inference server serving a pre-trained Keras model for advanced traffic classification.
 * **Modern SOC Dashboard**: Dark-themed, beautiful, real-time UI built with React, Recharts, and Framer Motion.
 * **WebSocket Integration**: Instantaneous updates pushed from backend to frontend without polling.
+* **Detailed Threat Library**: Complete reference documentation explaining the meaning, mechanisms, and mitigation for all 33+ detected attack vectors in [ATTACKS.md](file:///home/dell/Downloads/IDPS/ATTACKS.md).
 * **No Database Required**: Fully in-memory state for lightning-fast performance, suitable for college projects or lightweight network monitoring.
 
 ---
