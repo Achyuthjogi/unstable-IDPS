@@ -228,7 +228,8 @@ func ExtractFlowFeatures(f *flow.Flow, dstPort uint16) FlowFeatures {
 	if !f.ActiveEnd.IsZero() {
 		activePeriods = append(activePeriods, float64(f.ActiveEnd.Sub(f.ActiveStart).Microseconds()))
 	}
-	idlePeriods := f.IdlePeriods
+	idlePeriods := make([]float64, len(f.IdlePeriods))
+	copy(idlePeriods, f.IdlePeriods)
 
 	// Copy IAT slices to avoid data race after unlock
 	fwdIATs := make([]float64, len(f.FwdIATs))

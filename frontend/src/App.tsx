@@ -1,8 +1,9 @@
 import { useState, useEffect, Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
-import { Shield, Activity, AlertTriangle, ShieldOff, Settings, Network, AlertOctagon, Ban, Box, BrainCircuit } from 'lucide-react';
+import { Activity, AlertTriangle, ShieldOff, Settings, Network, AlertOctagon, Ban, BrainCircuit } from 'lucide-react';
 import Dashboard from './components/Dashboard';
+import AttackDetectionView from './components/AttackDetectionView';
 import ThreeDBackground from './components/ThreeDBackground';
 import { useWebSocket } from './hooks/useWebSocket';
 import { format } from 'date-fns';
@@ -35,19 +36,16 @@ class SafeBackground extends Component<{children: ReactNode}, {hasError: boolean
 function App() {
   const [activeTab, setActiveTab] = useState(window.location.pathname.replace('/', '') || 'overview');
   const { data, status } = useWebSocket(WS_URL, API_KEY ? [API_KEY] : undefined);
-  const [enable3D, setEnable3D] = useState(true);
 
   return (
     <Router>
       <div className="flex h-screen bg-transparent overflow-hidden text-foreground selection:bg-primary selection:text-primary-foreground relative z-10">
-        {enable3D && <SafeBackground><ThreeDBackground /></SafeBackground>}
+        <SafeBackground><ThreeDBackground /></SafeBackground>
         {/* Sidebar */}
         <aside className="w-64 kinetic-card z-10 flex flex-col rounded-r-2xl my-4 ml-4">
-          <div className="p-6 flex items-center gap-3">
-            <div className="p-2 kinetic-card rounded-lg">
-              <Shield className="w-6 h-6 text-primary" />
-            </div>
-            <h1 className="text-xl font-bold tracking-tight">IDPS</h1>
+          <div className="p-5 flex items-center gap-3">
+            <img src="/idps-logo.jpg" alt="IDPS Logo" className="w-10 h-10 rounded-lg" />
+            <h1 className="text-xl font-bold tracking-tight text-glow">IDPS</h1>
           </div>
           
           <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
@@ -58,7 +56,7 @@ function App() {
             <NavItem icon={<Settings />} label="Settings" path="/settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
           </nav>
           
-          <div className="p-4 border-t border-border text-xs text-muted-foreground flex flex-col gap-3">
+          <div className="p-4 border-t border-border text-xs text-muted-foreground">
             <div className="flex justify-between items-center">
               <span>v1.0.0</span>
               <span className="flex items-center gap-1">
@@ -66,13 +64,6 @@ function App() {
                 {status === 'connected' ? 'System Active' : 'Disconnected'}
               </span>
             </div>
-            <button 
-              onClick={() => setEnable3D(!enable3D)}
-              className="w-full kinetic-card hover:bg-white/5 border border-border/10 px-3 py-2 rounded-lg text-xs transition-all font-medium flex justify-center items-center gap-2"
-            >
-              <Box className="w-4 h-4" />
-              {enable3D ? 'Disable 3D UI' : 'Enable 3D UI'}
-            </button>
           </div>
         </aside>
 
@@ -83,6 +74,7 @@ function App() {
               <Route path="/" element={<Dashboard data={data} status={status} />} />
               <Route path="/alerts" element={<AlertsView data={data} />} />
               <Route path="/blocked" element={<BlockedIPsView data={data} />} />
+              <Route path="/attackdect" element={<AttackDetectionView />} />
 
               <Route path="/settings" element={<SettingsView />} />
             </Routes>
@@ -94,8 +86,25 @@ function App() {
 }
 
 function AlertsView({ data }: { data: any }) {
+  const [history, setHistory] = useState<any[]>([]);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/alerts?limit=500`, { headers: { 'X-API-Key': API_KEY } })
+      .then(res => res.json())
+      .then(d => setHistory(d || []))
+      .catch(console.error);
+  }, []);
+
   if (!data) return <div className="text-muted-foreground">Waiting for data...</div>;
-  const { alerts, blocked } = data;
+  
+  // Merge historical alerts with active real-time alerts from WebSocket
+  const liveAlerts = data.alerts || [];
+  const mergedMap = new Map();
+  history.forEach(a => mergedMap.set(a.id, a));
+  liveAlerts.forEach((a: any) => mergedMap.set(a.id, a));
+  const alerts = Array.from(mergedMap.values()).sort((a, b) => b.timestamp - a.timestamp);
+
+  const { blocked } = data;
   const blockedIPs = blocked ? blocked.map((b: any) => typeof b === 'string' ? b : b.ip) : [];
 
   const handleBlock = async (ip: string) => {
@@ -115,6 +124,8 @@ function AlertsView({ data }: { data: any }) {
         method: 'DELETE',
         headers: { 'X-API-Key': API_KEY }
       });
+      // Remove from local history state so it vanishes immediately
+      setHistory(prev => prev.filter(a => a.id !== id));
     } catch (e) {
       console.error(e);
     }

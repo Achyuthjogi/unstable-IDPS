@@ -55,17 +55,28 @@
 }
 
 @layer utilities {
+  /*
+   * PERFORMANCE FIX: Removed backdrop-filter: blur(12px) from kinetic-card.
+   *
+   * backdrop-filter creates a separate compositing layer for *every* element
+   * that uses it. With 30-50+ kinetic-cards on the dashboard, the GPU was
+   * compositing dozens of blur passes every frame — extremely expensive on
+   * integrated GPUs (Intel/AMD iGPU).
+   *
+   * Replaced with a simple semi-transparent background that achieves a similar
+   * frosted-glass aesthetic without the compositing cost.
+   */
   .kinetic-card {
-    background: linear-gradient(135deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    transition: all 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+    background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.015) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
   }
   
   .kinetic-card:hover {
-    border-color: rgba(0, 255, 204, 0.3);
-    box-shadow: 0 0 20px rgba(0, 255, 204, 0.1);
-    transform: translateY(-2px);
+    border-color: rgba(0, 255, 204, 0.25);
+    box-shadow: 0 0 15px rgba(0, 255, 204, 0.08);
+    /* Removed transform: translateY(-2px) — causes layout reflow on hover
+       for every card, which is janky when hovering across many cards quickly */
   }
 
   .text-glow {

@@ -51,19 +51,19 @@ func NewEngine(st *state.AppState, cfg *config.Config, fm *firewall.FirewallMana
 }
 
 // ProcessPacket is the main entry point for the new detection pipeline.
-func (e *Engine) ProcessPacket(packet PacketInfo) {
+func (e *Engine) ProcessPacket(packet PacketInfo) bool {
 	// 1. Run preserved rate-based heuristics and device tracking
 	AnalyzePacket(e.State, e.Config, e.Firewall, e.AlertLogger, packet)
 
 	// 2. Flow Tracking & Reassembly
 	if packet.SrcIP == "" || packet.DstIP == "" || packet.Protocol == "ARP" {
-		return
+		return true
 	}
 
 	srcIP := net.ParseIP(packet.SrcIP)
 	dstIP := net.ParseIP(packet.DstIP)
 	if srcIP == nil || dstIP == nil {
-		return
+		return true
 	}
 
 	var proto flow.Protocol
@@ -75,7 +75,7 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 	case "ICMP":
 		proto = flow.ProtoICMP
 	default:
-		return
+		return true
 	}
 
 	key := flow.NewKey(proto, srcIP, dstIP, packet.SrcPort, packet.DstPort)
@@ -85,7 +85,7 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 
 	f, _ := e.Tracker.GetOrCreate(key, pktSrc, packet.SrcPort)
 	if f == nil {
-		return // Max flows reached
+		return true // Max flows reached
 	}
 
 	tcpFlags := uint8(0)
@@ -112,16 +112,20 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 	e.Tracker.UpdateFlowML(f, pktSrc, packet.SrcPort, packet.Payload, packet.Seq, tcpFlags, packet.TCPHeaderLen, packet.TCPWindow)
 
 	isClientToServer := f.OriginalSrcIP == pktSrc && f.OriginalSrcPort == packet.SrcPort
+	shouldDrop := false
 
 	// 3. Protocol Inspection for Anomalies
-	if packet.DstPort == 80 || packet.SrcPort == 80 || packet.DstPort == 8080 {
+	if httpPorts[packet.DstPort] || httpPorts[packet.SrcPort] {
 		_, _, isAnomaly := e.HTTPInspect.InspectRequest(packet.Payload)
 		if isAnomaly {
 			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "HTTP Protocol Anomaly", "web-application-attack", 2, "NET-HTTP-ANOMALY", packet.SrcMAC)
+			shouldDrop = true
 		}
 	} else if packet.DstPort == 22 || packet.SrcPort == 22 {
 		if e.SSHInspect.Inspect(packet.Payload) {
 			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "Deprecated SSH Version Detected", "policy-violation", 3, "NET-SSH-POLICY", packet.SrcMAC)
+			// policy violation, maybe not drop immediately, but let's drop for completeness
+			shouldDrop = true
 		}
 	} else if (packet.DstPort == 53 || packet.SrcPort == 53) && packet.Protocol == "UDP" {
 		func() {
@@ -134,6 +138,7 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 			if err := dnsLayer.DecodeFromBytes(packet.Payload, gopacket.NilDecodeFeedback); err == nil {
 				if e.DNSInspect.Inspect(dnsLayer, true) {
 					e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "DNS Protocol Anomaly Detected", "protocol-command-decode", 3, "NET-DNS-ANOMALY", packet.SrcMAC)
+					shouldDrop = true
 				}
 			}
 		}()
@@ -157,6 +162,11 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 	}
 
 	if e.RuleEngine != nil {
+		// Normalize HTTP payloads (URL decode) to prevent evasion
+		if httpPorts[packet.DstPort] || httpPorts[packet.SrcPort] {
+			searchPayload = urlDecode(searchPayload)
+		}
+		
 		matchedRules := e.RuleEngine.Match(searchPayload)
 		for _, r := range matchedRules {
 			// Cleartext credentials on the configured gateway admin endpoint
@@ -176,6 +186,10 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 				severity = "Critical"
 			} else if r.Priority == 2 {
 				severity = "High"
+			}
+
+			if r.Priority <= 2 {
+				shouldDrop = true
 			}
 
 			ruleID := fmt.Sprintf("SID-%d", r.SID)
@@ -213,7 +227,12 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 		} else {
 			flowInitiatorIPStr = initIP.String()
 		}
+		
 		isOutboundFlow := isLocalIP(flowInitiatorIPStr)
+		// ALLOW loopback for testing! If it's exactly 127.0.0.1, treat it as inbound for testing ML.
+		if flowInitiatorIPStr == "127.0.0.1" {
+			isOutboundFlow = false
+		}
 
 		// Only predict for INBOUND flows with >=10 packets, and throttle to once per 5 seconds per flow
 		if !isOutboundFlow && totalPkts >= 10 && (now-lastCheck) > 5.0 {
@@ -247,14 +266,30 @@ func (e *Engine) ProcessPacket(packet PacketInfo) {
 					ruleID := fmt.Sprintf("ML-%s-001", resp.Prediction)
 					reason := fmt.Sprintf("ML Detection: %s (confidence: %.1f%%)", resp.Prediction, resp.Confidence*100)
 
-					// Inbound-initiated flow — this is a real attacker. Block them.
 					e.State.Mu.Lock()
-					triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, fmt.Sprintf("ML: %s Detected", resp.Prediction), "High", "High", attackerIP, pktDstIP, reason, resp.Confidence, pktSrcMAC)
+					severity := "High"
+					// Check if this IP recently triggered a signature or heuristic alert. If so, elevate ML alert to Critical.
+					hasRecentAlert := false
+					for key := range e.State.LastAlertTimes {
+						if len(key) > len(attackerIP) && key[:len(attackerIP)] == attackerIP {
+							hasRecentAlert = true
+							break
+						}
+					}
+					if hasRecentAlert {
+						severity = "Critical"
+						reason += " [Correlated with prior signature/heuristic alert]"
+					}
+					
+					// Inbound-initiated flow — this is a real attacker. Block them.
+					triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, fmt.Sprintf("ML: %s Detected", resp.Prediction), severity, "High", attackerIP, pktDstIP, reason, resp.Confidence, pktSrcMAC)
 					e.State.Mu.Unlock()
 				}
 			}()
 		}
 	}
+
+	return !shouldDrop
 }
 
 // isLocalIP checks if an IP belongs to this machine's interfaces.
@@ -318,11 +353,8 @@ func ipMatch(ruleNet, pktIP string) bool {
 		negate = true
 		ruleNet = strings.TrimPrefix(ruleNet, "!")
 		if strings.EqualFold(ruleNet, "$HOME_NET") {
-			res := !isInternalIP(pktIP) && !isLocalIP(pktIP)
-			if negate {
-				return res
-			}
-			return !res
+			// !$HOME_NET matches IPs that are NOT internal/local
+			return !isInternalIP(pktIP) && !isLocalIP(pktIP)
 		}
 	}
 
@@ -417,4 +449,44 @@ func (e *Engine) triggerRuleAlert(srcIP, dstIP, msg, classType string, priority 
 	e.State.Mu.Lock()
 	triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, classType, severity, "High", srcIP, dstIP, msg, 1.0, srcMAC)
 	e.State.Mu.Unlock()
+}
+
+// urlDecode performs a best-effort URL unescape on a byte slice.
+// If it contains invalid percent encodings, it replaces them with the raw bytes instead of failing.
+func urlDecode(in []byte) []byte {
+	out := make([]byte, 0, len(in))
+	for i := 0; i < len(in); i++ {
+		if in[i] == '%' && i+2 < len(in) {
+			a := in[i+1]
+			b := in[i+2]
+			if isHex(a) && isHex(b) {
+				out = append(out, unhex(a)<<4|unhex(b))
+				i += 2
+				continue
+			}
+		}
+		if in[i] == '+' {
+			out = append(out, ' ')
+		} else {
+			out = append(out, in[i])
+		}
+	}
+	return out
+}
+
+func isHex(c byte) bool {
+	return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
+}
+
+func unhex(c byte) byte {
+	if '0' <= c && c <= '9' {
+		return c - '0'
+	}
+	if 'a' <= c && c <= 'f' {
+		return c - 'a' + 10
+	}
+	if 'A' <= c && c <= 'F' {
+		return c - 'A' + 10
+	}
+	return 0
 }

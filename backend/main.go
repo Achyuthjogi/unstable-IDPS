@@ -43,6 +43,13 @@ func main() {
 	fmt.Println()
 
 	appState := state.NewAppState()
+	
+	// Start HA Sync
+	haSync := state.NewHASync(appState, "node-1", os.Getenv("HA_BIND_ADDR"), []string{})
+	if err := haSync.Start(); err != nil {
+		fmt.Printf("Warning: HA Sync failed to start: %v\n", err)
+	}
+
 	fwManager := firewall.NewFirewallManager()
 
 	// Setup Gateway if in NETWORK (or GATEWAY) mode
@@ -89,14 +96,14 @@ func main() {
 		engines = append(engines, detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger, mlClient))
 	}
 
-	// Start packet capture
-	stopCapture, err := capture.StartCapture(appState, cfg, fwManager, engines)
+	// Start packet capture using NFQueue
+	stopCapture, err := capture.StartNFQueue(appState, cfg, fwManager, engines)
 	if err != nil {
-		fmt.Printf("Capture setup FAILED:\n  reason: %v\n", err)
+		fmt.Printf("NFQueue Capture setup FAILED:\n  reason: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("Capture         : RUNNING")
+	fmt.Println("NFQueue Inline  : RUNNING")
 	fmt.Println("Detection       : RUNNING")
 	fmt.Println("Prevention      : RUNNING")
 	fmt.Println()
@@ -149,9 +156,10 @@ func main() {
 
 	// Setup API
 	apiState := &api.ApiState{
-		St:       appState,
-		Config:   cfg,
-		Firewall: fwManager,
+		St:          appState,
+		Config:      cfg,
+		Firewall:    fwManager,
+		AlertLogger: alertLogger,
 	}
 	
 	apiState.Reload = func(oldConfig *config.Config) error {
@@ -169,9 +177,9 @@ func main() {
 		}
 		
 		// Restart capture on new interface
-		stopCapture, err = capture.StartCapture(appState, cfg, fwManager, engines)
+		stopCapture, err = capture.StartNFQueue(appState, cfg, fwManager, engines)
 		if err != nil {
-			fmt.Printf("Capture reload FAILED: %v\n", err)
+			fmt.Printf("NFQueue Capture reload FAILED: %v\n", err)
 			return err
 		}
 		

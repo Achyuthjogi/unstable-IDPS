@@ -74,6 +74,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 	sshThresh := cfg.SSHBruteForceThreshold
 	portScanThresh := cfg.PortScanThreshold
 	udpThresh := cfg.UDPFloodThreshold
+	icmpThresh := cfg.ICMPFloodThreshold
 	dhcpIp := cfg.LegitimateDHCPServerIP
 	gatewayIp := cfg.GatewayIP
 	susRate := cfg.SuspiciousRateThreshold
@@ -89,9 +90,14 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 	}
 
 	// 1. Device tracking
-	if packet.SrcMAC != "" {
-		st.Mu.Lock()
-		device, exists := st.Devices[packet.SrcMAC]
+	deviceKey := packet.SrcMAC
+	if deviceKey == "" {
+		deviceKey = "IP:" + srcIP
+	}
+
+	st.Mu.Lock()
+	if isInternalIP(srcIP) {
+		device, exists := st.Devices[deviceKey]
 		if !exists {
 			device = &state.Device{
 				IP:        srcIP,
@@ -100,14 +106,16 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 				FirstSeen: currentTime,
 				LastSeen:  currentTime,
 			}
-			st.Devices[packet.SrcMAC] = device
+			st.Devices[deviceKey] = device
 		} else {
 			device.LastSeen = currentTime
 			if device.IP != srcIP {
 				device.IP = srcIP
 			}
 		}
+	}
 
+	if packet.SrcMAC != "" {
 		st.GlobalMACsSeen[packet.SrcMAC] = currentTime
 		recentMACs := 0
 		for mac, t := range st.GlobalMACsSeen {
@@ -120,9 +128,8 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		if recentMACs > 100 { // 100 unique MACs in 1 second
 			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-MAC-001", "MAC Flooding", "Critical", "High", srcIP, dstIP, fmt.Sprintf("MAC Flood / CAM Exhaustion (%d MACs/sec)", recentMACs), float64(recentMACs), packet.SrcMAC)
 		}
-
-		st.Mu.Unlock()
 	}
+	st.Mu.Unlock()
 
 	// Skip blocked IPs/MACs (IPS mode) and handle IP roaming
 	st.Mu.RLock()
@@ -164,6 +171,12 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 	st.ProtocolCounts[packet.Protocol]++
 	if packet.DstPort != 0 {
 		st.PortCounts[packet.DstPort]++
+	}
+
+	// Ignore localhost loopback for heuristics to prevent false positives from local services (e.g., Vite HMR, WebSockets)
+	if ip := net.ParseIP(srcIP); ip != nil && ip.IsLoopback() {
+		st.Mu.Unlock()
+		return
 	}
 
 	// Rate Tracking helper
@@ -436,7 +449,7 @@ func AnalyzePacket(st *state.AppState, cfg *config.Config, fm *firewall.Firewall
 		icmpRate := addTimestamp(&icmpTs, currentTime)
 		st.IPICMPTimestamps[srcIP] = icmpTs
 
-		if icmpRate > cfg.ICMPFloodThreshold {
+		if icmpRate > icmpThresh {
 			triggerAlert(st, cfg, fm, alertLogger, currentTime, "NET-ICMP-001", "ICMP Flood", "Medium", "High", srcIP, dstIP, fmt.Sprintf("ICMP Flood (%d pkts/s)", icmpRate), float64(icmpRate), packet.SrcMAC)
 		}
 

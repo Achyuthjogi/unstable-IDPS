@@ -6,17 +6,18 @@ function KineticNetwork() {
   const pointsRef = useRef<THREE.Points>(null);
   const linesRef = useRef<THREE.LineSegments>(null);
 
-  const particleCount = 200;
-  
+  // Reduced from 200 → 120 particles for lighter GPU load
+  const particleCount = 120;
+
   const [positions, colors] = useMemo(() => {
     const pos = new Float32Array(particleCount * 3);
     const col = new Float32Array(particleCount * 3);
-    
+
     for (let i = 0; i < particleCount; i++) {
       pos[i * 3] = (Math.random() - 0.5) * 20;
       pos[i * 3 + 1] = (Math.random() - 0.5) * 20;
       pos[i * 3 + 2] = (Math.random() - 0.5) * 20;
-      
+
       // Cyber cyan / minimalist white mixed
       const isCyan = Math.random() > 0.5;
       col[i * 3] = isCyan ? 0.0 : 0.8;
@@ -26,14 +27,22 @@ function KineticNetwork() {
     return [pos, col];
   }, []);
 
+  // 30fps throttle: only update every ~33ms
+  const lastUpdate = useRef(0);
+
   useFrame((state) => {
+    const elapsed = state.clock.getElapsedTime();
+    const now = elapsed * 1000;
+    if (now - lastUpdate.current < 33.33) return; // skip frame if < 33ms
+    lastUpdate.current = now;
+
     if (pointsRef.current) {
-      pointsRef.current.rotation.y = state.clock.getElapsedTime() * 0.05;
-      pointsRef.current.rotation.x = state.clock.getElapsedTime() * 0.02;
+      pointsRef.current.rotation.y = elapsed * 0.05;
+      pointsRef.current.rotation.x = elapsed * 0.02;
     }
     if (linesRef.current) {
-      linesRef.current.rotation.y = state.clock.getElapsedTime() * 0.05;
-      linesRef.current.rotation.x = state.clock.getElapsedTime() * 0.02;
+      linesRef.current.rotation.y = elapsed * 0.05;
+      linesRef.current.rotation.x = elapsed * 0.02;
     }
   });
 
@@ -46,7 +55,7 @@ function KineticNetwork() {
         const dy = positions[i * 3 + 1] - positions[j * 3 + 1];
         const dz = positions[i * 3 + 2] - positions[j * 3 + 2];
         const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-        
+
         if (dist < 3.5) {
           lines.push(
             positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2],
@@ -73,7 +82,7 @@ function KineticNetwork() {
         </bufferGeometry>
         <pointsMaterial size={0.05} vertexColors transparent opacity={0.8} />
       </points>
-      
+
       <lineSegments ref={linesRef}>
         <bufferGeometry>
           <bufferAttribute
@@ -90,7 +99,13 @@ function KineticNetwork() {
 export default function ThreeDBackground() {
   return (
     <div className="fixed inset-0 z-0 pointer-events-none bg-background">
-      <Canvas camera={{ position: [0, 0, 15], fov: 60 }}>
+      <Canvas
+        camera={{ position: [0, 0, 15], fov: 60 }}
+        /* Cap the render loop to ~30fps at the Canvas level */
+        frameloop="always"
+        dpr={[1, 1]}       /* Force 1x device pixel ratio — skip retina rendering */
+        gl={{ antialias: false, powerPreference: 'low-power' }}
+      >
         <fog attach="fog" args={['#050505', 10, 25]} />
         <KineticNetwork />
       </Canvas>

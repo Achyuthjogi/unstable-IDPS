@@ -142,7 +142,9 @@ func (t *Tracker) GetOrCreate(key Key, pktSrcIP [16]byte, pktSrcPort uint16) (*F
 
 	f, exists := t.flows[key]
 	if exists {
+		f.Mu.Lock()
 		f.LastSeen = time.Now()
+		f.Mu.Unlock()
 		return f, false
 	}
 
@@ -320,8 +322,18 @@ func (t *Tracker) UpdateFlowML(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, pa
 	// ── TCP state machine ────────────────────────────────────────────────
 	if tcpFlags&0x02 != 0 && tcpFlags&0x10 == 0 {
 		f.State = StateNew
+		// SYN packet: Initial sequence number (ISN). Next expected byte is ISN + 1.
+		if isClientToServer {
+			f.ClientStream.Init(seq + 1)
+		} else {
+			f.ServerStream.Init(seq + 1)
+		}
 	} else if tcpFlags&0x10 != 0 && f.State == StateNew {
 		f.State = StateEstablished
+		if !isClientToServer && tcpFlags&0x02 != 0 {
+			// SYN-ACK from server
+			f.ServerStream.Init(seq + 1)
+		}
 	} else if tcpFlags&0x01 != 0 || tcpFlags&0x04 != 0 {
 		f.State = StateClosing
 	}

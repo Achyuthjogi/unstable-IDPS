@@ -112,7 +112,7 @@ func Load() *Config {
 		WorkerCount:             getEnvInt("WORKER_COUNT", runtime.NumCPU()),
 		LegitimateDHCPServerIP:  getEnv("LEGITIMATE_DHCP_SERVER_IP", ""),
 		RulesPath:               getEnv("RULES_PATH", "./rules"),
-		AlertLogPath:            getEnv("ALERT_LOG_PATH", "alerts.json"),
+		AlertLogPath:            getEnv("ALERT_LOG_PATH", "alerts.db"),
 		MaxFlows:                getEnvInt("MAX_FLOWS", 100000),
 		MaxReassembly:           getEnvInt("MAX_REASSEMBLY", 65535),
 		MLServiceURL:            getEnv("ML_SERVICE_URL", "http://localhost:5001"),
@@ -185,4 +185,42 @@ func (c *Config) Clone() *Config {
 		MLServiceURL:            c.MLServiceURL,
 		MLEnabled:               c.MLEnabled,
 	}
+}
+
+// SaveToEnv writes the current configuration to a specified .env file
+func (c *Config) SaveToEnv(filepath string) error {
+	c.Mu.RLock()
+	defer c.Mu.RUnlock()
+
+	if filepath == "" {
+		filepath = ".env"
+	}
+
+	envMap, err := godotenv.Read(filepath)
+	if err != nil {
+		envMap = make(map[string]string) // Create new if doesn't exist
+	}
+
+	// Update all thresholds
+	envMap["SUSPICIOUS_RATE_THRESHOLD"] = strconv.Itoa(c.SuspiciousRateThreshold)
+	envMap["PORT_SCAN_THRESHOLD"] = strconv.Itoa(c.PortScanThreshold)
+	envMap["ICMP_FLOOD_THRESHOLD"] = strconv.Itoa(c.ICMPFloodThreshold)
+	envMap["UDP_FLOOD_THRESHOLD"] = strconv.Itoa(c.UDPFloodThreshold)
+	envMap["SYN_FLOOD_THRESHOLD"] = strconv.Itoa(c.SYNFloodThreshold)
+	envMap["SSH_BRUTE_FORCE_THRESHOLD"] = strconv.Itoa(c.SSHBruteForceThreshold)
+
+	// Update general settings
+	envMap["IDPS_DEPLOYMENT_MODE"] = c.IDPSDeploymentMode
+	envMap["IDPS_SECURITY_MODE"] = c.IDPSSecurityMode
+	envMap["WAN_INTERFACE"] = c.WanInterface
+	envMap["LAN_INTERFACE"] = c.LanInterface
+	envMap["CAPTURE_INTERFACE"] = c.CaptureInterface
+	envMap["INTERFACE"] = c.Interface
+	if c.MLEnabled {
+		envMap["ML_ENABLED"] = "true"
+	} else {
+		envMap["ML_ENABLED"] = "false"
+	}
+
+	return godotenv.Write(envMap, filepath)
 }

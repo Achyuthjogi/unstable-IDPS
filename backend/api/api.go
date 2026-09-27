@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"idps-backend/alert"
 	"idps-backend/config"
 	"idps-backend/firewall"
 	"idps-backend/state"
@@ -23,8 +24,9 @@ import (
 type ApiState struct {
 	St       *state.AppState
 	Config   *config.Config
-	Firewall *firewall.FirewallManager
-	Reload   func(oldConfig *config.Config) error
+	Firewall    *firewall.FirewallManager
+	AlertLogger *alert.Logger
+	Reload      func(oldConfig *config.Config) error
 }
 
 func authMiddleware(apiState *ApiState, next http.Handler) http.Handler {
@@ -143,6 +145,16 @@ func CreateRouter(apiState *ApiState) http.Handler {
 		}
 	})
 
+	mux.HandleFunc("/api/rules/thresholds", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			getThresholds(w, r, apiState)
+		} else if r.Method == http.MethodPost {
+			updateThresholds(w, r, apiState)
+		} else {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		wsHandler(w, r, apiState)
 	})
@@ -184,15 +196,69 @@ func getStatus(w http.ResponseWriter, r *http.Request, api *ApiState) {
 }
 
 func getAlerts(w http.ResponseWriter, r *http.Request, api *ApiState) {
-	api.St.Mu.RLock()
-	alerts := make([]state.Alert, len(api.St.Alerts))
-	copy(alerts, api.St.Alerts)
-	api.St.Mu.RUnlock()
+	if api.AlertLogger == nil || api.AlertLogger.GetDB() == nil {
+		// Fallback if DB is not available
+		api.St.Mu.RLock()
+		alerts := make([]state.Alert, len(api.St.Alerts))
+		copy(alerts, api.St.Alerts)
+		api.St.Mu.RUnlock()
+		json.NewEncoder(w).Encode(alerts)
+		return
+	}
+
+	limit := r.URL.Query().Get("limit")
+	if limit == "" {
+		limit = "100"
+	}
+
+	rows, err := api.AlertLogger.GetDB().Query("SELECT id, timestamp, rule_id, msg, classtype, severity, src_ip, dst_ip, action, confidence FROM alerts ORDER BY timestamp DESC LIMIT ?", limit)
+	if err != nil {
+		http.Error(w, "Failed to query alerts", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var alerts []state.Alert
+	for rows.Next() {
+		var a state.Alert
+		var tsStr string
+		if err := rows.Scan(&a.ID, &tsStr, &a.RuleID, &a.Reason, &a.AlertType, &a.Severity, &a.SourceIP, &a.DestIP, &a.Action, &a.Confidence); err == nil {
+			if t, err := time.Parse(time.RFC3339, tsStr); err == nil {
+				a.Timestamp = float64(t.UnixNano()) / 1e9
+			}
+			alerts = append(alerts, a)
+		}
+	}
 
 	json.NewEncoder(w).Encode(alerts)
 }
 
 func dismissAlert(w http.ResponseWriter, r *http.Request, api *ApiState, id string) {
+	// If we have an AlertLogger (SQLite DB), delete the alert from there
+	if api.AlertLogger != nil && api.AlertLogger.GetDB() != nil {
+		err := api.AlertLogger.DeleteAlert(id)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "Failed to delete alert from database"})
+			return
+		}
+		
+		// Also clean up in-memory array just in case
+		api.St.Mu.Lock()
+		defer api.St.Mu.Unlock()
+		newAlerts := make([]state.Alert, 0, len(api.St.Alerts))
+		for _, alert := range api.St.Alerts {
+			if alert.ID != id {
+				newAlerts = append(newAlerts, alert)
+			}
+		}
+		api.St.Alerts = newAlerts
+
+		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Alert dismissed"})
+		return
+	}
+
+	// Fallback logic for memory-only mode
 	api.St.Mu.Lock()
 	defer api.St.Mu.Unlock()
 
@@ -467,6 +533,11 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		}
 	}
 
+	// Persist the new configuration to .env
+	if err := api.Config.SaveToEnv(".env"); err != nil {
+		fmt.Printf("Warning: failed to save settings to .env: %v\n", err)
+	}
+
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Configuration applied successfully."})
 }
 
@@ -482,6 +553,58 @@ func getInterfaces(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		names = append(names, i.Name)
 	}
 	json.NewEncoder(w).Encode(names)
+}
+
+func getThresholds(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	api.Config.Mu.RLock()
+	defer api.Config.Mu.RUnlock()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"SuspiciousRateThreshold": api.Config.SuspiciousRateThreshold,
+		"PortScanThreshold":       api.Config.PortScanThreshold,
+		"ICMPFloodThreshold":      api.Config.ICMPFloodThreshold,
+		"UDPFloodThreshold":       api.Config.UDPFloodThreshold,
+		"SYNFloodThreshold":       api.Config.SYNFloodThreshold,
+		"SSHBruteForceThreshold":  api.Config.SSHBruteForceThreshold,
+	})
+}
+
+func updateThresholds(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	var body map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	
+	api.Config.Mu.Lock()
+	defer api.Config.Mu.Unlock()
+
+	if val, ok := body["SuspiciousRateThreshold"].(float64); ok {
+		api.Config.SuspiciousRateThreshold = int(val)
+	}
+	if val, ok := body["PortScanThreshold"].(float64); ok {
+		api.Config.PortScanThreshold = int(val)
+	}
+	if val, ok := body["ICMPFloodThreshold"].(float64); ok {
+		api.Config.ICMPFloodThreshold = int(val)
+	}
+	if val, ok := body["UDPFloodThreshold"].(float64); ok {
+		api.Config.UDPFloodThreshold = int(val)
+	}
+	if val, ok := body["SYNFloodThreshold"].(float64); ok {
+		api.Config.SYNFloodThreshold = int(val)
+	}
+	if val, ok := body["SSHBruteForceThreshold"].(float64); ok {
+		api.Config.SSHBruteForceThreshold = int(val)
+	}
+
+	// Persist the thresholds to .env
+	go func() {
+		if err := api.Config.SaveToEnv(".env"); err != nil {
+			fmt.Printf("Warning: failed to save thresholds to .env: %v\n", err)
+		}
+	}()
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Thresholds updated successfully."})
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
@@ -513,6 +636,16 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	}
 	defer conn.Close()
 
+	// Drain incoming messages (ping/pong/close frames) in background
+	// to prevent connection hangs per WebSocket RFC.
+	go func() {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -531,7 +664,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 
 		packetCount := api.St.PacketCount
 		activeConns := api.St.ActiveConnections
-		alertsCount := len(api.St.Alerts)
 		blockedIPsCount := len(api.St.BlockedIPs)
 
 		// Top SRC IPs
@@ -554,21 +686,44 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 			topDstPorts = append(topDstPorts, portCount{Port: port, Count: count})
 		}
 
-		// Protocol counts (must copy to avoid concurrent map read/write during JSON marshal)
+		// Protocol counts
 		protocolCounts := make(map[string]int)
 		for k, v := range api.St.ProtocolCounts {
 			protocolCounts[k] = v
 		}
-
-		// Alerts (last 10 reversed)
+		alertsCount := 0
 		var recentAlerts []state.Alert
-		startIdx := alertsCount - 10
-		if startIdx < 0 {
-			startIdx = 0
+
+		if api.AlertLogger != nil && api.AlertLogger.GetDB() != nil {
+			// Fetch from SQLite
+			api.AlertLogger.GetDB().QueryRow("SELECT COUNT(*) FROM alerts").Scan(&alertsCount)
+			
+			rows, err := api.AlertLogger.GetDB().Query("SELECT id, timestamp, rule_id, msg, classtype, severity, src_ip, dst_ip, action, confidence FROM alerts ORDER BY timestamp DESC LIMIT 10")
+			if err == nil {
+				for rows.Next() {
+					var a state.Alert
+					var tsStr string
+					if err := rows.Scan(&a.ID, &tsStr, &a.RuleID, &a.Reason, &a.AlertType, &a.Severity, &a.SourceIP, &a.DestIP, &a.Action, &a.Confidence); err == nil {
+						if t, err := time.Parse(time.RFC3339, tsStr); err == nil {
+							a.Timestamp = float64(t.UnixNano()) / 1e9
+						}
+						recentAlerts = append(recentAlerts, a)
+					}
+				}
+				rows.Close()
+			}
+		} else {
+			// Fallback to in-memory alerts
+			alertsCount = len(api.St.Alerts)
+			startIdx := alertsCount - 10
+			if startIdx < 0 {
+				startIdx = 0
+			}
+			for i := alertsCount - 1; i >= startIdx; i-- {
+				recentAlerts = append(recentAlerts, api.St.Alerts[i])
+			}
 		}
-		for i := alertsCount - 1; i >= startIdx; i-- {
-			recentAlerts = append(recentAlerts, api.St.Alerts[i])
-		}
+
 		if recentAlerts == nil {
 			recentAlerts = make([]state.Alert, 0)
 		}

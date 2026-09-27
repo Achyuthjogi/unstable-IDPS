@@ -10,6 +10,7 @@ import (
 	"idps-backend/config"
 	"idps-backend/detection"
 	"idps-backend/firewall"
+	"idps-backend/inspect"
 	"idps-backend/state"
 	"net"
 
@@ -76,7 +77,6 @@ func StartCapture(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 		wg.Add(1)
 		go func(workerID int, h *afpacket.TPacket, eng *detection.Engine) {
 			defer wg.Done()
-
 			source := gopacket.NewPacketSource(h, layers.LinkTypeEthernet)
 
 			for {
@@ -297,13 +297,21 @@ func extractTCPLog(st *state.AppState, ts float64, srcIP string, payload []byte)
 		}
 	}
 
-	if len(payload) > 43 && payload[0] == 0x16 && payload[1] == 0x03 && payload[5] == 0x01 {
+	inspector := &inspect.TLSInspector{}
+	if sni, found := inspector.InspectClientHello(payload); found {
+		appendTrafficLog(st, ts, srcIP, sni, "HTTPS")
+	} else if len(payload) > 43 && payload[0] == 0x16 && payload[1] == 0x03 && payload[5] == 0x01 {
 		appendTrafficLog(st, ts, srcIP, "TLS Session", "HTTPS")
 	}
 }
 
 func appendTrafficLog(st *state.AppState, ts float64, srcIP, domain, proto string) {
 	if srcIP == "" {
+		return
+	}
+
+	// Ignore loopback traffic to keep the live traffic log clean
+	if ip := net.ParseIP(srcIP); ip != nil && ip.IsLoopback() {
 		return
 	}
 
