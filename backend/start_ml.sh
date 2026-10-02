@@ -10,8 +10,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 VENV_DIR="$PROJECT_ROOT/.venv"
 ML_SERVER="$SCRIPT_DIR/ml_server.py"
-MODEL_PATH="$PROJECT_ROOT/idps_model.keras"
-SCALER_PATH="$PROJECT_ROOT/idps_scaler.pkl"
+MODEL_PATH="$PROJECT_ROOT/zero_day_model.joblib"
+SCALER_PATH="$PROJECT_ROOT/feature_scaler.joblib"
 
 # Ensure PATH includes user local bin even if executed via sudo
 if [ -n "$SUDO_USER" ]; then
@@ -27,12 +27,12 @@ echo "===================================="
 # Check model files exist
 if [ ! -f "$MODEL_PATH" ]; then
     echo "ERROR: Model file not found at $MODEL_PATH"
-    echo "Please place your trained idps_model.keras in the project root."
+    echo "Please place your trained zero_day_model.joblib in the project root."
     exit 1
 fi
 if [ ! -f "$SCALER_PATH" ]; then
     echo "WARNING: Scaler file not found at $SCALER_PATH"
-    echo "Inference will fall back to log-scaling. For best results, place idps_scaler.pkl in the project root."
+    echo "Inference will fall back to log-scaling. For best results, place feature_scaler.joblib in the project root."
 fi
 
 # Create/activate virtual environment
@@ -57,7 +57,7 @@ source "$VENV_DIR/bin/activate"
 # Install dependencies only if needed
 if ! python -c "import fastapi, uvicorn, pydantic" >/dev/null 2>&1; then
     echo "Installing dependencies (this may take a few minutes)..."
-    pip install --default-timeout=1000 --quiet fastapi uvicorn tensorflow numpy pydantic scikit-learn
+    pip install --default-timeout=1000 --quiet fastapi uvicorn joblib numpy pydantic scikit-learn pandas
 fi
 
 # Export model paths

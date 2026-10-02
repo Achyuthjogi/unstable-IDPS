@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"bufio"
 
 	"github.com/joho/godotenv"
 )
@@ -72,6 +74,31 @@ func DiscoverInterfaces() (string, string) {
 	return wan, lan
 }
 
+func DiscoverGatewayIP() string {
+	file, err := os.Open("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 3 && fields[1] == "00000000" {
+			gwHex := fields[2]
+			if len(gwHex) == 8 {
+				ipBytes, err := hex.DecodeString(gwHex)
+				if err == nil {
+					// Little-endian format
+					ip := net.IPv4(ipBytes[3], ipBytes[2], ipBytes[1], ipBytes[0])
+					return ip.String()
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func Load() *Config {
 	_ = godotenv.Load() // Ignore error if .env doesn't exist
 
@@ -108,7 +135,7 @@ func Load() *Config {
 		SYNFloodThreshold:       getEnvInt("SYN_FLOOD_THRESHOLD", 150),
 		SSHBruteForceThreshold:  getEnvInt("SSH_BRUTE_FORCE_THRESHOLD", 10),
 		BlockTTLSeconds:         getEnvInt("BLOCK_TTL_SECONDS", 600),
-		GatewayIP:               getEnv("GATEWAY_IP", ""),
+		GatewayIP:               getEnv("GATEWAY_IP", DiscoverGatewayIP()),
 		WorkerCount:             getEnvInt("WORKER_COUNT", runtime.NumCPU()),
 		LegitimateDHCPServerIP:  getEnv("LEGITIMATE_DHCP_SERVER_IP", ""),
 		RulesPath:               getEnv("RULES_PATH", "./rules"),

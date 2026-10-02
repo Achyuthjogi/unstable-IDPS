@@ -27,23 +27,8 @@ echo -e "${BLUE}==========================================${NC}"
 echo -e "${BLUE}  Starting Ultimate IDPS (Full Stack)     ${NC}"
 echo -e "${BLUE}==========================================${NC}"
 
-echo ""
-echo "Select IDPS Interface Mode:"
-echo "1) Web Interface (Browser)"
-echo "2) Terminal Dashboard (CLI)"
-read -p "Enter choice [1 or 2]: " UI_MODE
-
-if [ "$UI_MODE" != "1" ] && [ "$UI_MODE" != "2" ]; then
-    echo -e "${RED}Invalid choice. Defaulting to Web Interface (1).${NC}"
-    UI_MODE="1"
-fi
-echo ""
-
-# Pre-cache sudo for CLI mode so it can run backend in bg
-if [ "$UI_MODE" = "2" ] && [ "$EUID" -ne 0 ]; then
-    echo -e "${GREEN}--> Caching sudo credentials for background packet engine...${NC}"
-    sudo -v
-fi
+# Automatically selecting Web Interface Mode
+UI_MODE="1"
 
 # Verify npm availability (Only needed for Web Mode)
 if [ "$UI_MODE" = "1" ] && ! command -v npm >/dev/null 2>&1; then
@@ -191,6 +176,13 @@ fi
 
 echo -e "${GREEN}--> Starting Go Packet Engine (sudo required)...${NC}"
 echo -e "    Press Ctrl+C at any time to safely shut down all services."
+
+echo -e "${GREEN}--> Restarting Suricata (Inline IPS on Queue 1)...${NC}"
+if [ "$EUID" -eq 0 ]; then
+    systemctl restart suricata || echo -e "${RED}Failed to restart Suricata${NC}"
+else
+    sudo systemctl restart suricata || echo -e "${RED}Failed to restart Suricata${NC}"
+fi
 
 if [ "$UI_MODE" = "1" ]; then
     # Run Backend in foreground for Web Mode

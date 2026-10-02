@@ -106,6 +106,10 @@ func main() {
 	fmt.Println("NFQueue Inline  : RUNNING")
 	fmt.Println("Detection       : RUNNING")
 	fmt.Println("Prevention      : RUNNING")
+
+	// Start Suricata Eve.json Tailer
+	go detection.TailSuricataEve(appState, cfg, fwManager, alertLogger)
+
 	fmt.Println()
 	fmt.Println("====================================")
 

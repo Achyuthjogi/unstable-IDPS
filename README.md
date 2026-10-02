@@ -7,10 +7,11 @@ The increasing frequency of network attacks requires robust, real-time threat id
 
 ## 🌟 Features
 
-* **Hybrid Threat Detection**: Combines a lightning-fast rule-based heuristic engine with a Deep Neural Network (DNN) for zero-day anomaly detection.
+* **Hybrid Threat Detection**: Combines a lightning-fast rule-based heuristic engine with a lightweight Machine Learning model (Isolation Forest) for zero-day anomaly detection.
+* **Suricata Engine Integration**: Natively integrates with Suricata for deep packet inspection using Emerging Threats (ET) rules via `eve.json` tailing.
 * **Real-Time Traffic Analysis**: Monitors live network packets using `gopacket` and dynamically extracts 78 flow features (CICFlowMeter style).
 * **Automated Mitigation**: Enforces prevention by dynamically adding and removing `iptables` and `ebtables` rules at the host or inline gateway level to block malicious IPs.
-* **Machine Learning Microservice**: A dedicated Python FastAPI inference server serving a pre-trained Keras model for advanced traffic classification.
+* **Machine Learning Microservice**: A dedicated Python FastAPI inference server serving a pre-trained Scikit-Learn model for advanced traffic classification.
 * **Modern SOC Dashboard**: Dark-themed, beautiful, real-time UI built with React, Recharts, and Framer Motion.
 * **WebSocket Integration**: Instantaneous updates pushed from backend to frontend without polling.
 * **Detailed Threat Library**: Complete reference documentation explaining the meaning, mechanisms, and mitigation for all 33+ detected attack vectors in [ATTACKS.md](file:///home/dell/Downloads/IDPS/ATTACKS.md).
@@ -36,26 +37,31 @@ graph TD
         WS_Server[WebSocket Manager]
         State[(In-Memory State)]
         Detection[Rule-Based Heuristics]
+        SuricataTail[Suricata eve.json Tailer]
         Capture[gopacket Sniffer]
         WorkerPool[Bounded Worker Pool]
         
         Capture --> WorkerPool
         WorkerPool --> Detection
         Detection --> State
+        SuricataTail --> State
         State --> WS_Server
         State --> API
     end
     
-    subgraph Python Backend [ML Microservice]
+    subgraph External Engines
         ML_API[FastAPI Inference]
-        DNN[(Trained Keras Model)]
+        ML_MODEL[(Trained Isolation Forest)]
+        Suricata[Suricata IDS/IPS Engine]
         
-        ML_API --> DNN
+        ML_API --> ML_MODEL
     end
 
     Detection <-->|Feature Extraction & HTTP POST| ML_API
+    Suricata -->|Writes alerts to eve.json| SuricataTail
     WS_Client <-->|Real-time metrics & alerts| WS_Server
     Network((Local Network)) --> Capture
+    Network --> Suricata
 ```
 
 ---
@@ -80,8 +86,8 @@ IDPS/
 │   │   ├── App.tsx           # Layout and routing
 │   │   └── main.tsx          # React entry point
 │   └── package.json          # Node dependencies
-├── idps_model.keras          # Trained Deep Neural Network
-├── idps_scaler.pkl           # Feature Scaler
+├── zero_day_model.joblib     # Trained Machine Learning Model
+├── feature_scaler.joblib     # Feature Scaler
 └── start_all.sh              # Single-command launch script
 ```
 
@@ -93,7 +99,8 @@ IDPS/
 * Go 1.20+
 * Python 3.12+ (with `pip` and `venv`)
 * Node.js v20+ (with npm)
-* Linux OS (Ubuntu recommended) for raw socket capture
+* Suricata (Intrusion Detection Engine)
+* Linux OS (Ubuntu/Fedora recommended) for raw socket capture
 * `sudo` privileges
 
 ### Quick Start (Recommended)
@@ -115,7 +122,7 @@ If you prefer to run the components manually in separate terminals:
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate
-   pip install fastapi uvicorn tensorflow numpy pydantic scikit-learn
+   pip install fastapi uvicorn joblib numpy pydantic scikit-learn pandas
    python backend/ml_server.py
    ```
 

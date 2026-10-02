@@ -195,7 +195,7 @@ export default function Dashboard({ data, status }: { data: any; status: string 
           <div className="w-px h-6 bg-border" />
           <div
             className="flex items-center gap-2 text-sm"
-            title={system.ml_enabled !== false ? 'AI/DNN Model Active: Inbound flows analyzed for zero-day anomalies' : 'AI/DNN Model Disabled: ML inference bypassed'}
+            title={system.ml_enabled !== false ? 'AI/ML Model Active: Inbound flows analyzed for zero-day anomalies' : 'AI/ML Model Disabled: ML inference bypassed'}
           >
             <BrainCircuit className={`w-4 h-4 ${system.ml_enabled !== false ? 'text-purple-400' : 'text-muted-foreground'}`} />
             <span className={`px-2 py-0.5 text-xs font-semibold rounded-full border ${

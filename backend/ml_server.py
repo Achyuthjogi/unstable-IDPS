@@ -3,22 +3,22 @@
 IDPS ML Inference Microservice (Production-Ready)
 Loads the trained DNN model + StandardScaler and serves predictions via FastAPI on port 5001.
 """
-import os, sys, warnings, pickle
+import os, sys, warnings
 import numpy as np
+import joblib
 warnings.filterwarnings("ignore", category=UserWarning)
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import tensorflow as tf
 
-MODEL_PATH = os.environ.get("ML_MODEL_PATH", os.path.join(os.path.dirname(__file__), "..", "idps_model.keras"))
-SCALER_PATH = os.environ.get("ML_SCALER_PATH", os.path.join(os.path.dirname(__file__), "..", "idps_scaler.pkl"))
+MODEL_PATH = os.environ.get("ML_MODEL_PATH", os.path.join(os.path.dirname(__file__), "..", "zero_day_model.joblib"))
+SCALER_PATH = os.environ.get("ML_SCALER_PATH", os.path.join(os.path.dirname(__file__), "..", "feature_scaler.joblib"))
 PORT = int(os.environ.get("ML_SERVICE_PORT", "5001"))
 
 # Load Model
 print(f"Loading ML model from: {MODEL_PATH}")
 try:
-    model = tf.keras.models.load_model(MODEL_PATH)
+    model = joblib.load(MODEL_PATH)
     print(f"Model loaded!")
 except Exception as e:
     print(f"FATAL: Failed to load ML model: {e}", file=sys.stderr)
@@ -28,8 +28,7 @@ except Exception as e:
 scaler = None
 print(f"Loading scaler from: {SCALER_PATH}")
 try:
-    with open(SCALER_PATH, "rb") as f:
-        scaler = pickle.load(f)
+    scaler = joblib.load(SCALER_PATH)
     print("Scaler loaded!")
 except Exception as e:
     print(f"WARNING: No scaler found ({e}). Will use log-scale fallback.", file=sys.stderr)
@@ -174,6 +173,22 @@ async def predict(features: FlowFeatures):
         X = np.array([arr], dtype=np.float64)
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
+        # Ensure feature length matches model expectations BEFORE scaling
+        if hasattr(model, 'n_features_in_'):
+            expected_features = model.n_features_in_
+            if X.shape[1] > expected_features:
+                X = X[:, :expected_features]
+            elif X.shape[1] < expected_features:
+                padding = np.zeros((1, expected_features - X.shape[1]))
+                X = np.hstack((X, padding))
+        elif scaler is not None and hasattr(scaler, 'n_features_in_'):
+            expected_features = scaler.n_features_in_
+            if X.shape[1] > expected_features:
+                X = X[:, :expected_features]
+            elif X.shape[1] < expected_features:
+                padding = np.zeros((1, expected_features - X.shape[1]))
+                X = np.hstack((X, padding))
+
         # Scale using the trained StandardScaler (or fallback)
         if scaler is not None:
             X_scaled = scaler.transform(X)
@@ -181,14 +196,18 @@ async def predict(features: FlowFeatures):
             # Fallback log-scale if scaler not available
             X_scaled = np.log1p(np.abs(X)) * np.sign(X)
 
-        # TensorFlow Inference
-        proba = model.predict(X_scaled, verbose=0)[0]
-        class_idx = int(np.argmax(proba))
-        conf = float(proba[class_idx])
-
-        # Index 0 = BENIGN, Index 1 = ATTACK
-        is_malicious = (class_idx != 0)
-        pred_label = "ATTACK" if is_malicious else "BENIGN"
+        # Scikit-Learn Inference (Isolation Forest)
+        prediction = model.predict(X_scaled)[0]
+        
+        # Isolation Forest outputs: 1 is Normal, -1 is Anomaly
+        is_malicious = (prediction == -1)
+        pred_label = "ATTACK (0-Day Anomaly)" if is_malicious else "BENIGN"
+        
+        # Confidence score approximation
+        if hasattr(model, 'decision_function'):
+            conf = float(abs(model.decision_function(X_scaled)[0]))
+        else:
+            conf = 1.0
 
         return PredictionResponse(malicious=is_malicious, prediction=pred_label, confidence=round(conf, 4))
     except Exception as e:

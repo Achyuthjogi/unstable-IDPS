@@ -167,7 +167,9 @@ func (fm *FirewallManager) SetupGateway(cfg *config.Config) error {
 		if capIface != "" {
 			fmt.Printf("FirewallManager: Setting up HOST mode NFQUEUE routing on %s\n", capIface)
 			fm.ensureRule(cfg, "iptables", "-I", "INPUT", "1", "-i", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-IN")
+			fm.ensureRule(cfg, "iptables", "-I", "INPUT", "2", "-i", capIface, "-j", "NFQUEUE", "--queue-num", "1", "-m", "comment", "--comment", "SURICATA-NFQ-HOST-IN")
 			fm.ensureRule(cfg, "iptables", "-I", "OUTPUT", "1", "-o", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-OUT")
+			fm.ensureRule(cfg, "iptables", "-I", "OUTPUT", "2", "-o", capIface, "-j", "NFQUEUE", "--queue-num", "1", "-m", "comment", "--comment", "SURICATA-NFQ-HOST-OUT")
 		}
 		return nil
 	}
@@ -223,10 +225,22 @@ func (fm *FirewallManager) SetupGateway(cfg *config.Config) error {
 		return fmt.Errorf("failed to configure WAN->LAN nfqueue: %v", err)
 	}
 
+	// Route FORWARD WAN -> LAN to Suricata NFQUEUE
+	err = fm.ensureRule(cfg, "iptables", "-A", "FORWARD", "-i", wan, "-o", lan, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-m", "comment", "--comment", "SURICATA-NFQ-IN", "-j", "NFQUEUE", "--queue-num", "1")
+	if err != nil {
+		return fmt.Errorf("failed to configure WAN->LAN suricata nfqueue: %v", err)
+	}
+
 	// Route FORWARD LAN -> WAN to NFQUEUE
 	err = fm.ensureRule(cfg, "iptables", "-A", "FORWARD", "-i", lan, "-o", wan, "-m", "comment", "--comment", "IDPS-NFQ-OUT", "-j", "NFQUEUE", "--queue-num", "0")
 	if err != nil {
 		return fmt.Errorf("failed to configure LAN->WAN nfqueue: %v", err)
+	}
+
+	// Route FORWARD LAN -> WAN to Suricata NFQUEUE
+	err = fm.ensureRule(cfg, "iptables", "-A", "FORWARD", "-i", lan, "-o", wan, "-m", "comment", "--comment", "SURICATA-NFQ-OUT", "-j", "NFQUEUE", "--queue-num", "1")
+	if err != nil {
+		return fmt.Errorf("failed to configure LAN->WAN suricata nfqueue: %v", err)
 	}
 
 	// Setup Layer 2 MAC-based Isolation Chains (ebtables)
@@ -254,7 +268,9 @@ func (fm *FirewallManager) TeardownGateway(cfg *config.Config) {
 	if mode == "HOST" {
 		if capIface != "" {
 			fm.runCommand(cfg, "sudo", "iptables", "-D", "INPUT", "-i", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-IN")
+			fm.runCommand(cfg, "sudo", "iptables", "-D", "INPUT", "-i", capIface, "-j", "NFQUEUE", "--queue-num", "1", "-m", "comment", "--comment", "SURICATA-NFQ-HOST-IN")
 			fm.runCommand(cfg, "sudo", "iptables", "-D", "OUTPUT", "-o", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-OUT")
+			fm.runCommand(cfg, "sudo", "iptables", "-D", "OUTPUT", "-o", capIface, "-j", "NFQUEUE", "--queue-num", "1", "-m", "comment", "--comment", "SURICATA-NFQ-HOST-OUT")
 		}
 		return
 	}
@@ -267,7 +283,9 @@ func (fm *FirewallManager) TeardownGateway(cfg *config.Config) {
 
 	_ = fm.runCommand(cfg, "sudo", "iptables", "-t", "nat", "-D", "POSTROUTING", "-o", wan, "-m", "comment", "--comment", "IDPS-NAT", "-j", "MASQUERADE")
 	_ = fm.runCommand(cfg, "sudo", "iptables", "-D", "FORWARD", "-i", wan, "-o", lan, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-m", "comment", "--comment", "IDPS-NFQ-IN", "-j", "NFQUEUE", "--queue-num", "0")
+	_ = fm.runCommand(cfg, "sudo", "iptables", "-D", "FORWARD", "-i", wan, "-o", lan, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-m", "comment", "--comment", "SURICATA-NFQ-IN", "-j", "NFQUEUE", "--queue-num", "1")
 	_ = fm.runCommand(cfg, "sudo", "iptables", "-D", "FORWARD", "-i", lan, "-o", wan, "-m", "comment", "--comment", "IDPS-NFQ-OUT", "-j", "NFQUEUE", "--queue-num", "0")
+	_ = fm.runCommand(cfg, "sudo", "iptables", "-D", "FORWARD", "-i", lan, "-o", wan, "-m", "comment", "--comment", "SURICATA-NFQ-OUT", "-j", "NFQUEUE", "--queue-num", "1")
 
 	if fm.ipForwardOriginal == "0" && !dryRun {
 		_ = fm.runCommand(cfg, "sudo", "sysctl", "-w", "net.ipv4.ip_forward=0")

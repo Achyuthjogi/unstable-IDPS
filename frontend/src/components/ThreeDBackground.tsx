@@ -6,8 +6,8 @@ function KineticNetwork() {
   const pointsRef = useRef<THREE.Points>(null);
   const linesRef = useRef<THREE.LineSegments>(null);
 
-  // Reduced from 200 → 120 particles for lighter GPU load
-  const particleCount = 120;
+  // Moderate density (180 particles) for a perfect balance
+  const particleCount = 180;
 
   const [positions, colors] = useMemo(() => {
     const pos = new Float32Array(particleCount * 3);
@@ -27,14 +27,8 @@ function KineticNetwork() {
     return [pos, col];
   }, []);
 
-  // 30fps throttle: only update every ~33ms
-  const lastUpdate = useRef(0);
-
   useFrame((state) => {
     const elapsed = state.clock.getElapsedTime();
-    const now = elapsed * 1000;
-    if (now - lastUpdate.current < 33.33) return; // skip frame if < 33ms
-    lastUpdate.current = now;
 
     if (pointsRef.current) {
       pointsRef.current.rotation.y = elapsed * 0.05;

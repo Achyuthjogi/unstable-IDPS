@@ -344,7 +344,7 @@ function SettingsView() {
                   </span>
                 </div>
                 <p className="text-sm text-muted-foreground mt-1 max-w-2xl leading-relaxed">
-                  Deep Neural Network (DNN) traffic classifier analyzing flow durations, packet counts, and inter-arrival timing to detect zero-day anomalies in real time. Turn OFF if running on resource-constrained hardware to bypass Python inference calls.
+                  Machine Learning (Isolation Forest) traffic classifier analyzing flow durations, packet counts, and inter-arrival timing to detect zero-day anomalies in real time. Turn OFF if running on resource-constrained hardware to bypass Python inference calls.
                 </p>
               </div>
             </div>
