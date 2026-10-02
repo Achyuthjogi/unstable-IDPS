@@ -1,4 +1,4 @@
-# Nexus IDPS: Real-Time Intrusion Detection and Prevention System
+# IDPS: Real-Time Intrusion Detection and Prevention System
 
 ![IDPS Dashboard Mockup](https://via.placeholder.com/1200x600.png?text=Nexus+IDPS+Dashboard)
 
