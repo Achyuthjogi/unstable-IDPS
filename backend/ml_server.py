@@ -159,8 +159,16 @@ class PredictionResponse(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model_loaded": True, "scaler_loaded": scaler is not None,
-            "classes": CLASSES, "feature_count": len(FEATURE_ORDER)}
+    return {
+        "status": "ok",
+        "model_loaded": True,
+        "scaler_loaded": scaler is not None,
+        "model_type": type(model).__name__,
+        "classes": CLASSES,
+        "feature_count": len(FEATURE_ORDER),
+        "anomaly_threshold": -0.05,
+        "version": "2.1.0-enterprise"
+    }
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(features: FlowFeatures):
@@ -199,15 +207,22 @@ async def predict(features: FlowFeatures):
         # Scikit-Learn Inference (Isolation Forest)
         prediction = model.predict(X_scaled)[0]
         
-        # Isolation Forest outputs: 1 is Normal, -1 is Anomaly
-        is_malicious = (prediction == -1)
-        pred_label = "ATTACK (0-Day Anomaly)" if is_malicious else "BENIGN"
-        
-        # Confidence score approximation
+        # Decision function: negative values indicate outliers
+        score = 0.0
         if hasattr(model, 'decision_function'):
-            conf = float(abs(model.decision_function(X_scaled)[0]))
+            score = float(model.decision_function(X_scaled)[0])
+
+        # High-assurance anomaly threshold:
+        # Avoid labelling borderline flows as confirmed attacks without sufficient evidence.
+        ANOMALY_THRESHOLD = -0.05
+        is_malicious = (prediction == -1 and score < ANOMALY_THRESHOLD)
+
+        if is_malicious:
+            pred_label = "ATTACK (0-Day Anomaly)"
+            conf = min(0.99, max(0.60, 0.60 + abs(score) * 2.5))
         else:
-            conf = 1.0
+            pred_label = "BENIGN"
+            conf = min(0.99, max(0.70, 0.70 + max(0.0, score) * 1.5))
 
         return PredictionResponse(malicious=is_malicious, prediction=pred_label, confidence=round(conf, 4))
     except Exception as e:

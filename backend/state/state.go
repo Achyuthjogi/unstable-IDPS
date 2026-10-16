@@ -25,7 +25,9 @@ type Alert struct {
 	Reason       string  `json:"reason"`
 	Action       string  `json:"action"`
 	ActionResult string  `json:"action_result"`
-	Status       string  `json:"status"`
+	Status       string  `json:"status"` // "DETECTED", "BLOCK_REQUESTED", "BLOCK_CONFIRMED", "BLOCK_FAILED"
+	Evidence     string  `json:"evidence,omitempty"`
+	Platform     string  `json:"platform,omitempty"`
 	ExpiresAt    float64 `json:"expires_at,omitempty"`
 	Rate         float64 `json:"rate"`
 }
@@ -36,6 +38,8 @@ type IPBlock struct {
 	RuleID     string  `json:"rule_id"`
 	Reason     string  `json:"reason"`
 	Confidence string  `json:"confidence"`
+	Status     string  `json:"status"` // "BLOCK_CONFIRMED", "BLOCK_REQUESTED", "BLOCK_FAILED"
+	Platform   string  `json:"platform"`
 	CreatedAt  float64 `json:"created_at"`
 	ExpiresAt  float64 `json:"expires_at"`
 }
@@ -62,6 +66,17 @@ type AppState struct {
 	Alerts             []Alert
 	PacketCount        int
 	DroppedPacketCount int
+
+	// Real-time telemetry metrics
+	PacketsCaptured  uint64 `json:"packets_captured"`
+	PacketsInspected uint64 `json:"packets_inspected"`
+	PacketsDropped   uint64 `json:"packets_dropped"`
+	PacketsMissed    uint64 `json:"packets_missed"`
+	ActiveFlows      int    `json:"active_flows"`
+
+	BlocksRequested uint64 `json:"blocks_requested"`
+	BlocksConfirmed uint64 `json:"blocks_confirmed"`
+	BlocksFailed    uint64 `json:"blocks_failed"`
 
 	ThreatTimeline []ThreatTimeline
 	TrafficLog     []TrafficLog
@@ -219,7 +234,8 @@ func (s *AppState) cleanupLoop() {
 		}
 
 		for mac, device := range s.Devices {
-			if now-device.LastSeen > 300.0 {
+			// Keep devices in inventory across brief idle periods; only prune after 24 hours of total inactivity
+			if now-device.LastSeen > 86400.0 {
 				delete(s.Devices, mac)
 			}
 		}
@@ -230,17 +246,8 @@ func (s *AppState) cleanupLoop() {
 			}
 		}
 
-		// Clean up expired IP and MAC blocks manually if needed (though usually done by TTL, we can passively expire here)
-		for ip, b := range s.BlockedIPs {
-			if b.ExpiresAt > 0 && now > b.ExpiresAt {
-				delete(s.BlockedIPs, ip)
-			}
-		}
-		for mac, b := range s.BlockedMACs {
-			if b.ExpiresAt > 0 && now > b.ExpiresAt {
-				delete(s.BlockedMACs, mac)
-			}
-		}
+		// Note: BlockedIPs and BlockedMACs unblocking is managed by the firewall manager
+		// to guarantee OS-level kernel rules are explicitly unblocked, avoiding permanent rule leaks.
 
 		s.Mu.Unlock()
 	}

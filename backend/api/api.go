@@ -11,9 +11,13 @@ import (
 	"time"
 
 	"idps-backend/alert"
+	"idps-backend/audit"
+	"idps-backend/auth"
 	"idps-backend/config"
 	"idps-backend/firewall"
+	"idps-backend/platform"
 	"idps-backend/state"
+	"strconv"
 
 	"github.com/gorilla/websocket"
 	"github.com/rs/cors"
@@ -31,34 +35,36 @@ type ApiState struct {
 
 func authMiddleware(apiState *ApiState, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Public health check allowed without auth for monitoring/load balancers
+		if r.URL.Path == "/health" || r.URL.Path == "/api/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		apiState.Config.Mu.RLock()
-		expectedKey := apiState.Config.APIKey
+		adminKey := apiState.Config.AdminAPIKey
+		if adminKey == "" {
+			adminKey = apiState.Config.APIKey
+		}
+		analystKey := apiState.Config.AnalystAPIKey
+		viewerKey := apiState.Config.ViewerAPIKey
 		apiState.Config.Mu.RUnlock()
 
-		key := r.Header.Get("X-API-Key")
-		if key == "" {
-			key = r.Header.Get("Authorization")
-			key = strings.TrimPrefix(key, "Bearer ")
-		}
-		if key == "" {
-			// For WebSockets, check protocols or query params
-			if r.URL.Path == "/ws" {
-				protocols := r.Header.Get("Sec-WebSocket-Protocol")
-				for _, p := range strings.Split(protocols, ",") {
-					if strings.TrimSpace(p) == expectedKey {
-						key = expectedKey // Match found in subprotocol
-						break
-					}
-				}
-				if key == "" {
-					key = r.URL.Query().Get("api_key")
-				}
-			}
+		authMgr := auth.NewManager(adminKey, analystKey, viewerKey)
+		user, authenticated := authMgr.Authenticate(r)
+		if !authenticated {
+			audit.Get().Log("anonymous", "AUTH_FAILURE", r.URL.Path, "FAILED", platform.GetInfo().OS, fmt.Sprintf("Unauthorized request to %s from %s", r.URL.Path, r.RemoteAddr))
+			http.Error(w, "Unauthorized: valid API key required", http.StatusUnauthorized)
+			return
 		}
 
-		if key != expectedKey {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
+		// RBAC: mutating endpoints require RoleAdmin
+		if r.Method == http.MethodPost || r.Method == http.MethodDelete || r.Method == http.MethodPut {
+			if !authMgr.Authorize(user, auth.RoleAdmin) {
+				audit.Get().Log(user.Username, "ACCESS_DENIED", r.URL.Path, "FAILED", platform.GetInfo().OS, fmt.Sprintf("User role '%s' insufficient for administrative action", user.Role))
+				http.Error(w, "Forbidden: Administrator role required", http.StatusForbidden)
+				return
+			}
 		}
 
 		next.ServeHTTP(w, r)
@@ -153,6 +159,25 @@ func CreateRouter(apiState *ApiState) http.Handler {
 		} else {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
+	})
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		getHealth(w, r, apiState)
+	})
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		getHealth(w, r, apiState)
+	})
+	mux.HandleFunc("/api/metrics", func(w http.ResponseWriter, r *http.Request) {
+		getMetrics(w, r, apiState)
+	})
+	mux.HandleFunc("/api/platform", func(w http.ResponseWriter, r *http.Request) {
+		getPlatform(w, r, apiState)
+	})
+	mux.HandleFunc("/api/audit", func(w http.ResponseWriter, r *http.Request) {
+		getAuditLogs(w, r, apiState)
+	})
+	mux.HandleFunc("/api/firewall/allowlist", func(w http.ResponseWriter, r *http.Request) {
+		handleAllowlist(w, r, apiState)
 	})
 
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -808,7 +833,14 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		gatewayIP := api.Config.GatewayIP
 		api.Config.Mu.RUnlock()
 
-		// --- Build JSON payload ---
+		capturedCount := api.St.PacketsCaptured
+		if capturedCount == 0 && packetCount > 0 {
+			capturedCount = uint64(packetCount)
+		}
+		inspectedCount := api.St.PacketsInspected
+		if inspectedCount == 0 && packetCount > 0 {
+			inspectedCount = uint64(packetCount)
+		}
 
 		data := map[string]interface{}{
 			"system": map[string]interface{}{
@@ -818,8 +850,27 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 				"ml_enabled":         mlEnabled,
 				"gateway_ip":         gatewayIP,
 			},
+			"platform": platform.GetInfo(),
+			"telemetry": platform.GetTelemetry(),
+			"metrics": map[string]interface{}{
+				"packets_captured":  capturedCount,
+				"packets_inspected": inspectedCount,
+				"packets_dropped":   api.St.PacketsDropped,
+				"packets_missed":    api.St.PacketsMissed,
+				"active_flows":      api.St.ActiveFlows,
+				"blocks_confirmed":  api.St.BlocksConfirmed,
+				"blocks_requested":  api.St.BlocksRequested,
+				"blocks_failed":     api.St.BlocksFailed,
+			},
 			"network": map[string]interface{}{
 				"packet_count":      packetCount,
+				"packets_captured":  capturedCount,
+				"packets_inspected": inspectedCount,
+				"packets_dropped":   api.St.PacketsDropped,
+				"packets_missed":    api.St.PacketsMissed,
+				"blocks_confirmed":  api.St.BlocksConfirmed,
+				"blocks_requested":  api.St.BlocksRequested,
+				"blocks_failed":     api.St.BlocksFailed,
 				"protocol_counts":   protocolCounts,
 				"top_src_ips":       topSrcIPs,
 				"top_dst_ports":     topDstPorts,
@@ -831,10 +882,91 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 			"blocked":     blocked,
 			"timeline":    timeline,
 			"traffic_log": recentTraffic,
+			"audit_logs":  audit.Get().Recent(25),
 		}
 
 		if err := conn.WriteJSON(data); err != nil {
 			break
 		}
 	}
+}
+
+func getHealth(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	pInfo := platform.GetInfo()
+	telemetry := platform.GetTelemetry()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "healthy",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"platform":  pInfo,
+		"telemetry": telemetry,
+	})
+}
+
+func getMetrics(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	api.St.Mu.RLock()
+	defer api.St.Mu.RUnlock()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"packets_captured":  api.St.PacketsCaptured,
+		"packets_inspected": api.St.PacketsInspected,
+		"packets_dropped":   api.St.PacketsDropped,
+		"packets_missed":    api.St.PacketsMissed,
+		"active_flows":      api.St.ActiveFlows,
+		"blocks_confirmed":  api.St.BlocksConfirmed,
+		"blocks_requested":  api.St.BlocksRequested,
+		"blocks_failed":     api.St.BlocksFailed,
+		"total_alerts":      len(api.St.Alerts),
+		"active_blocks":     len(api.St.BlockedIPs),
+	})
+}
+
+func getPlatform(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(platform.GetInfo())
+}
+
+func getAuditLogs(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	limit := 50
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	logs := audit.Get().Recent(limit)
+	json.NewEncoder(w).Encode(logs)
+}
+
+func handleAllowlist(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodGet {
+		json.NewEncoder(w).Encode(api.Firewall.GetAllowlist())
+		return
+	}
+	if r.Method == http.MethodPost {
+		var body struct {
+			IP string `json:"ip"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.IP == "" {
+			http.Error(w, "Invalid IP provided", http.StatusBadRequest)
+			return
+		}
+		api.Firewall.AddAllowlist(body.IP)
+		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": fmt.Sprintf("Added %s to allowlist", body.IP)})
+		return
+	}
+	if r.Method == http.MethodDelete {
+		ip := r.URL.Query().Get("ip")
+		if ip == "" {
+			http.Error(w, "Query param 'ip' required", http.StatusBadRequest)
+			return
+		}
+		api.Firewall.RemoveAllowlist(ip)
+		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": fmt.Sprintf("Removed %s from allowlist", ip)})
+		return
+	}
+	http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 }

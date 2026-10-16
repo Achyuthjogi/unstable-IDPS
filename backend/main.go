@@ -16,14 +16,20 @@ import (
 	"idps-backend/config"
 	"idps-backend/detection"
 	"idps-backend/firewall"
+	"idps-backend/platform"
 	"idps-backend/rules"
 	"idps-backend/state"
 )
 
 func main() {
-	fmt.Println("Starting IDPS Go Backend...")
+	fmt.Println("Starting Enterprise Nexus IDPS Backend...")
 
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("FATAL: Configuration validation failed: %v", err)
+	}
+
+	pInfo := platform.GetInfo()
 
 	alertLogger, err := alert.NewLogger(cfg.AlertLogPath)
 	if err != nil {
@@ -31,15 +37,27 @@ func main() {
 		alertLogger = &alert.Logger{}
 	}
 
+	fmt.Println("====================================================")
+	fmt.Println("    NEXUS ENTERPRISE IDPS - SURICATA CORE ENGINE    ")
+	fmt.Println("====================================================")
+	fmt.Printf("Primary Engine: SURICATA IDS/IPS (Deep Packet Inspection)\n")
+	fmt.Printf("OS / Arch     : %s / %s (Elevated: %v)\n", pInfo.OS, pInfo.Arch, pInfo.IsElevated)
+	fmt.Printf("Host Driver   : %s\n", pInfo.DriverName)
+	fmt.Printf("Firewall      : %s\n", pInfo.FirewallBackend)
+	fmt.Printf("Deployment    : %s\n", cfg.IDPSDeploymentMode)
+	fmt.Printf("Security      : %s\n", cfg.IDPSSecurityMode)
+	fmt.Printf("Interface     : %s\n", cfg.CaptureInterface)
+	if len(pInfo.Errors) > 0 {
+		for _, e := range pInfo.Errors {
+			fmt.Printf("  [!] ERROR: %s\n", e)
+		}
+	}
+	if len(pInfo.Warnings) > 0 {
+		for _, w := range pInfo.Warnings {
+			fmt.Printf("  [*] NOTICE: %s\n", w)
+		}
+	}
 	fmt.Println("====================================")
-	fmt.Println("        IDPS GATEWAY STATUS")
-	fmt.Println("====================================")
-	fmt.Println()
-	fmt.Printf("Deployment : %s\n", cfg.IDPSDeploymentMode)
-	fmt.Printf("Security   : %s\n", cfg.IDPSSecurityMode)
-	fmt.Printf("WAN        : %s\n", cfg.WanInterface)
-	fmt.Printf("LAN        : %s\n", cfg.LanInterface)
-	fmt.Printf("Capture    : %s\n", cfg.CaptureInterface)
 	fmt.Println()
 
 	appState := state.NewAppState()
@@ -52,14 +70,13 @@ func main() {
 
 	fwManager := firewall.NewFirewallManager()
 
-	// Setup Gateway if in NETWORK (or GATEWAY) mode
+	// Setup Gateway/Host firewall routing
 	err = fwManager.SetupGateway(cfg)
 	if err != nil {
-		fmt.Printf("Gateway setup FAILED:\n  reason: %v\n", err)
-		os.Exit(1)
+		fmt.Printf("Firewall setup warning: %v\n", err)
 	}
 
-	fmt.Println("Firewall        : READY")
+	fmt.Printf("Firewall Backend : READY (%s)\n", fwManager.PlatformName())
 
 	// Setup Rule Engine
 	ruleEngine := rules.NewEngine()
@@ -67,7 +84,7 @@ func main() {
 		fmt.Printf("Warning: Could not load rules from %s: %v\n", cfg.RulesPath, err)
 	}
 	ruleEngine.Build()
-	fmt.Printf("Rule Engine     : READY (Rules loaded: %d)\n", len(ruleEngine.Rules))
+	fmt.Printf("Rule Engine      : READY (Rules loaded: %d)\n", len(ruleEngine.Rules))
 
 	// Setup ML Client
 	mlClient := detection.NewMLClient(cfg.MLServiceURL)
@@ -75,7 +92,7 @@ func main() {
 	if mlClient.IsAvailable() {
 		mlStatus = "CONNECTED"
 	}
-	fmt.Printf("ML Service      : %s (%s)\n", mlStatus, cfg.MLServiceURL)
+	fmt.Printf("ML Service       : %s (%s)\n", mlStatus, cfg.MLServiceURL)
 
 	// Periodically re-check ML service availability
 	go func() {
@@ -96,19 +113,21 @@ func main() {
 		engines = append(engines, detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger, mlClient))
 	}
 
-	// Start packet capture using NFQueue
-	stopCapture, err := capture.StartNFQueue(appState, cfg, fwManager, engines)
+	// Start cross-platform packet capture engine
+	stopCapture, err := capture.StartAutoCapture(appState, cfg, fwManager, engines)
 	if err != nil {
-		fmt.Printf("NFQueue Capture setup FAILED:\n  reason: %v\n", err)
+		fmt.Printf("Packet Capture setup FAILED:\n  reason: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("NFQueue Inline  : RUNNING")
-	fmt.Println("Detection       : RUNNING")
-	fmt.Println("Prevention      : RUNNING")
+	fmt.Println("Packet Capture   : RUNNING")
+	fmt.Println("Detection        : RUNNING")
+	fmt.Println("Prevention       : RUNNING")
 
-	// Start Suricata Eve.json Tailer
-	go detection.TailSuricataEve(appState, cfg, fwManager, alertLogger)
+	// Start Suricata as Primary DPI Engine across both Linux and Windows
+	if cfg.SuricataPrimaryEngine {
+		go detection.StartSuricataPrimaryEngine(appState, cfg, fwManager, alertLogger)
+	}
 
 	fmt.Println()
 	fmt.Println("====================================")
@@ -181,9 +200,9 @@ func main() {
 		}
 		
 		// Restart capture on new interface
-		stopCapture, err = capture.StartNFQueue(appState, cfg, fwManager, engines)
+		stopCapture, err = capture.StartAutoCapture(appState, cfg, fwManager, engines)
 		if err != nil {
-			fmt.Printf("NFQueue Capture reload FAILED: %v\n", err)
+			fmt.Printf("Packet Capture reload FAILED: %v\n", err)
 			return err
 		}
 		

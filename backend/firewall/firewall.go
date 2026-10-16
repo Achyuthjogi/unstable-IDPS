@@ -1,90 +1,169 @@
-// Topology & Layer 2 Isolation Context:
-// This IDPS is designed to run on a gateway node, typically an Ubuntu laptop
-// acting as a NetworkManager hotspot bridge (LAN: wlan0/nm-wlan) with USB tethering (WAN: usb0).
-//
-// IP-based blocking via iptables FORWARD/INPUT chains is insufficient for this topology because:
-// 1. Attackers can renew their DHCP lease to change their IP and bypass the block.
-// 2. Clients connected to the same hotspot bridge can communicate directly at Layer 2,
-//    bypassing the iptables FORWARD chain and evading isolation.
-//
-// To solve this, we use `ebtables` to enforce MAC-based Layer 2 isolation directly
-// on the bridge. This guarantees durable blocking across IP changes and prevents
-// client-to-client attacks on the same hotspot. (ap_isolate via hostapd could also work,
-// but ebtables allows granular, per-device programmatic blocking).
 package firewall
 
 import (
 	"fmt"
 	"net"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"idps-backend/audit"
 	"idps-backend/config"
+	"idps-backend/platform"
 )
 
-type FirewallManager struct {
-	trustedIPs        []string
-	ipForwardOriginal string
-	
-	// TTL Cache to prevent duplicate shell executions and auto-unblock
-	blockCache        map[string]time.Time
-	mu                sync.Mutex
+// BlockStatus represents the discrete verified state of a block enforcement action.
+type BlockStatus string
+
+const (
+	BlockStatusRequested  BlockStatus = "BLOCK_REQUESTED"
+	BlockStatusConfirmed  BlockStatus = "BLOCK_CONFIRMED"
+	BlockStatusFailed     BlockStatus = "BLOCK_FAILED"
+	BlockStatusRolledBack BlockStatus = "BLOCK_ROLLED_BACK"
+)
+
+// BlockResult contains complete audited telemetry for a firewall block attempt.
+type BlockResult struct {
+	IP        string      `json:"ip"`
+	MAC       string      `json:"mac,omitempty"`
+	RuleID    string      `json:"rule_id,omitempty"`
+	Reason    string      `json:"reason,omitempty"`
+	Status    BlockStatus `json:"status"`
+	Error     string      `json:"error,omitempty"`
+	Timestamp time.Time   `json:"timestamp"`
+	ExpiresAt time.Time   `json:"expires_at"`
+	Platform  string      `json:"platform"`
+	Backend   string      `json:"backend"`
 }
 
+type blockRecord struct {
+	mac       string
+	ruleID    string
+	reason    string
+	expiresAt time.Time
+}
+
+// PlatformFirewall defines the OS-specific firewall operations.
+type PlatformFirewall interface {
+	ApplyBlock(ip, mac string, cfg *config.Config) error
+	RemoveBlock(ip, mac string, cfg *config.Config) error
+	VerifyBlock(ip string, cfg *config.Config) bool
+	SetupGateway(cfg *config.Config) error
+	TeardownGateway(cfg *config.Config) error
+	Name() string
+}
+
+// FirewallManager manages cross-platform firewall rules, safe allowlists, and TTL expiration.
+type FirewallManager struct {
+	backend    PlatformFirewall
+	trustedIPs []string
+	allowlist  map[string]bool
+	blockCache map[string]blockRecord
+	history    []BlockResult
+	cfg        *config.Config
+	mu         sync.RWMutex
+}
+
+// NewFirewallManager creates and initializes the firewall manager with platform adapter.
 func NewFirewallManager() *FirewallManager {
 	fm := &FirewallManager{
+		backend:    newPlatformFirewall(),
 		trustedIPs: []string{"127.0.0.1", "::1"},
-		blockCache: make(map[string]time.Time),
+		allowlist:  make(map[string]bool),
+		blockCache: make(map[string]blockRecord),
+		history:    make([]BlockResult, 0, 100),
 	}
 	go fm.ttlSweeper()
 	return fm
 }
 
-func (fm *FirewallManager) ttlSweeper() {
-	for {
-		time.Sleep(10 * time.Second) // Check every 10 seconds
-		now := time.Now()
-		
+// PlatformName returns the active firewall adapter name.
+func (fm *FirewallManager) PlatformName() string {
+	return fm.backend.Name()
+}
+
+// SetupGateway configures the gateway/host routing rules on the active platform.
+func (fm *FirewallManager) SetupGateway(cfg *config.Config) error {
+	if cfg != nil {
 		fm.mu.Lock()
-		for ip, expiry := range fm.blockCache {
-			if now.After(expiry) {
-				// TTL Expired. Unblock.
-				// We don't have the MAC here, but iptables unblock is most critical.
-				// For a real production system, cache a struct { mac, expiry }.
-				fmt.Printf("FirewallManager: TTL expired for %s. Unblocking...\n", ip)
-				// We need the config, but we don't have it easily here.
-				// Actually, we should just fire a teardown using a dummy config or refactor.
-				// For now, execute iptables directly since we know it's a block.
-				bin := iptablesBin(ip)
-				exec.Command("sudo", bin, "-D", "INPUT", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP").Run()
-				exec.Command("sudo", bin, "-D", "FORWARD", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP").Run()
-				delete(fm.blockCache, ip)
-			}
-		}
+		fm.cfg = cfg
 		fm.mu.Unlock()
 	}
+	return fm.backend.SetupGateway(cfg)
+}
+
+// TeardownGateway tears down the gateway/host routing rules on the active platform.
+func (fm *FirewallManager) TeardownGateway(cfg *config.Config) {
+	_ = fm.backend.TeardownGateway(cfg)
+}
+
+// AddAllowlist adds an IP or subnet to the protected allowlist.
+func (fm *FirewallManager) AddAllowlist(ip string) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	fm.allowlist[ip] = true
+	audit.Get().Log("admin", "ALLOWLIST_ADD", ip, "CONFIRMED", platform.GetInfo().OS, "Added to firewall allowlist")
+}
+
+// RemoveAllowlist removes an IP from the protected allowlist.
+func (fm *FirewallManager) RemoveAllowlist(ip string) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	delete(fm.allowlist, ip)
+	audit.Get().Log("admin", "ALLOWLIST_REMOVE", ip, "CONFIRMED", platform.GetInfo().OS, "Removed from firewall allowlist")
+}
+
+// GetAllowlist returns all allowlisted IPs.
+func (fm *FirewallManager) GetAllowlist() []string {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
+	var list []string
+	for ip := range fm.allowlist {
+		list = append(list, ip)
+	}
+	return list
 }
 
 func (fm *FirewallManager) isSafeToBlock(ip string, cfg *config.Config) bool {
+	safe, _ := fm.isSafeToBlockWithReason(ip, cfg)
+	return safe
+}
+
+func (fm *FirewallManager) isSafeToBlockWithReason(ip string, cfg *config.Config) (bool, string) {
+	if ip == "" {
+		return false, "empty IP address"
+	}
+
 	cfg.Mu.RLock()
 	gatewayIP := cfg.GatewayIP
+	dhcpIP := cfg.LegitimateDHCPServerIP
 	cfg.Mu.RUnlock()
 
 	if gatewayIP != "" && ip == gatewayIP {
-		return false
+		return false, "protected default gateway"
 	}
-	for _, trusted := range fm.trustedIPs {
-		if ip == trusted {
-			return false
-		}
-	}
-	if strings.HasPrefix(ip, "224.") || strings.HasPrefix(ip, "239.") || strings.HasSuffix(ip, ".255") {
-		return false
+	if dhcpIP != "" && ip == dhcpIP {
+		return false, "protected DHCP server"
 	}
 
+	fm.mu.RLock()
+	isAllowlisted := fm.allowlist[ip]
+	fm.mu.RUnlock()
+	if isAllowlisted {
+		return false, "IP is on protected allowlist"
+	}
+
+	for _, trusted := range fm.trustedIPs {
+		if ip == trusted {
+			return false, "loopback/trusted interface"
+		}
+	}
+
+	if strings.HasPrefix(ip, "224.") || strings.HasPrefix(ip, "239.") || strings.HasSuffix(ip, ".255") {
+		return false, "multicast/broadcast range"
+	}
+
+	// Protect all local interface IPs
 	addrs, err := net.InterfaceAddrs()
 	if err == nil {
 		for _, addr := range addrs {
@@ -96,309 +175,163 @@ func (fm *FirewallManager) isSafeToBlock(ip string, cfg *config.Config) bool {
 				localIP = v.IP
 			}
 			if localIP != nil && localIP.String() == ip {
-				return false
+				return false, "local host interface IP"
 			}
 		}
 	}
-	return true
+
+	return true, ""
 }
 
-// iptablesBin returns "ip6tables" for IPv6 addresses, "iptables" for IPv4.
-func iptablesBin(ip string) string {
-	if strings.Contains(ip, ":") {
-		return "ip6tables"
-	}
-	return "iptables"
-}
-
-func (fm *FirewallManager) runCommand(cfg *config.Config, name string, args ...string) error {
-	cfg.Mu.RLock()
-	dryRun := cfg.FirewallDryRun
-	cfg.Mu.RUnlock()
-
-	if dryRun {
-		fmt.Printf("[DRY RUN] Would execute: %s %s\n", name, strings.Join(args, " "))
-		return nil
-	}
-	cmd := exec.Command(name, args...)
-	return cmd.Run()
-}
-
-func (fm *FirewallManager) ruleExists(cfg *config.Config, bin string, args ...string) bool {
-	cfg.Mu.RLock()
-	dryRun := cfg.FirewallDryRun
-	cfg.Mu.RUnlock()
-
-	if dryRun {
-		return false
-	}
-	// Build a -C (check) command from the original args.
-	// -A CHAIN ... → -C CHAIN ...
-	// -I CHAIN pos ... → -C CHAIN ...  (strip the position number)
-	var checkArgs []string
-	if len(args) > 0 && args[0] == "-I" && len(args) > 2 {
-		// args = ["-I", "CHAIN", "pos", rest...]
-		// Skip args[0] ("-I") and args[2] (position number)
-		checkArgs = append([]string{"-C", args[1]}, args[3:]...)
-	} else {
-		checkArgs = append([]string{"-C"}, args[1:]...)
-	}
-	cmd := exec.Command("sudo", append([]string{bin}, checkArgs...)...)
-	return cmd.Run() == nil
-}
-
-func (fm *FirewallManager) ensureRule(cfg *config.Config, bin string, args ...string) error {
-	if !fm.ruleExists(cfg, bin, args...) {
-		return fm.runCommand(cfg, "sudo", append([]string{bin}, args...)...)
-	}
-	return nil
-}
-
-func (fm *FirewallManager) SetupGateway(cfg *config.Config) error {
-	cfg.Mu.RLock()
-	mode := cfg.IDPSDeploymentMode
-	wan := cfg.WanInterface
-	lan := cfg.LanInterface
-	dryRun := cfg.FirewallDryRun
-	capIface := cfg.CaptureInterface
-	cfg.Mu.RUnlock()
-
-	if mode == "HOST" {
-		if capIface != "" {
-			fmt.Printf("FirewallManager: Setting up HOST mode NFQUEUE routing on %s\n", capIface)
-			fm.ensureRule(cfg, "iptables", "-I", "INPUT", "1", "-i", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-IN")
-			fm.ensureRule(cfg, "iptables", "-I", "INPUT", "2", "-i", capIface, "-j", "NFQUEUE", "--queue-num", "1", "-m", "comment", "--comment", "SURICATA-NFQ-HOST-IN")
-			fm.ensureRule(cfg, "iptables", "-I", "OUTPUT", "1", "-o", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-OUT")
-			fm.ensureRule(cfg, "iptables", "-I", "OUTPUT", "2", "-o", capIface, "-j", "NFQUEUE", "--queue-num", "1", "-m", "comment", "--comment", "SURICATA-NFQ-HOST-OUT")
+// BlockDeviceWithResult attempts to block an attacker IP/MAC and verifies enforcement.
+func (fm *FirewallManager) BlockDeviceWithResult(ip, mac string, cfg *config.Config, reason, ruleID string) BlockResult {
+	now := time.Now().UTC()
+	ttl := 600 * time.Second
+	if cfg != nil {
+		cfg.Mu.RLock()
+		if cfg.BlockTTLSeconds > 0 {
+			ttl = time.Duration(cfg.BlockTTLSeconds) * time.Second
 		}
-		return nil
+		cfg.Mu.RUnlock()
+	}
+	expiresAt := now.Add(ttl)
+
+	res := BlockResult{
+		IP:        ip,
+		MAC:       mac,
+		RuleID:    ruleID,
+		Reason:    reason,
+		Timestamp: now,
+		ExpiresAt: expiresAt,
+		Platform:  platform.GetInfo().OS,
+		Backend:   fm.backend.Name(),
 	}
 
-	if mode != "GATEWAY" && mode != "NETWORK" {
-		return nil
+	// 1. Safety verification
+	safe, reasonNotSafe := fm.isSafeToBlockWithReason(ip, cfg)
+	if !safe {
+		res.Status = BlockStatusFailed
+		res.Error = fmt.Sprintf("Refused to block: %s", reasonNotSafe)
+		audit.Get().Log("system:firewall", "BLOCK_REFUSED", ip, "FAILED", res.Platform, res.Error)
+		return res
 	}
 
-	fmt.Printf("FirewallManager: Setting up Gateway NAT routing: WAN=%s, LAN=%s\n", wan, lan)
-
-	if wan == "" || lan == "" {
-		return fmt.Errorf("WAN or LAN interface is not specified")
-	}
-	if wan == lan {
-		return fmt.Errorf("WAN and LAN interfaces cannot be the same")
-	}
-
-	// Validate interfaces exist
-	if _, err := net.InterfaceByName(wan); err != nil && !dryRun {
-		return fmt.Errorf("WAN interface %s not found: %v", wan, err)
-	}
-	if _, err := net.InterfaceByName(lan); err != nil && !dryRun {
-		return fmt.Errorf("LAN interface %s not found: %v", lan, err)
-	}
-
-	if !dryRun {
-		b, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
-		if err == nil {
-			fm.ipForwardOriginal = strings.TrimSpace(string(b))
-		}
-	}
-
-	if err := fm.runCommand(cfg, "sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
-		return fmt.Errorf("failed to enable ipv4 forwarding: %v", err)
-	}
-
-	if !dryRun {
-		b, _ := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
-		if strings.TrimSpace(string(b)) != "1" {
-			return fmt.Errorf("IPv4 forwarding is not enabled (read %s)", string(b))
-		}
-	}
-
-	// NAT Rule
-	err := fm.ensureRule(cfg, "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", wan, "-m", "comment", "--comment", "IDPS-NAT", "-j", "MASQUERADE")
-	if err != nil {
-		return fmt.Errorf("failed to configure NAT: %v", err)
-	}
-
-	// Route FORWARD WAN -> LAN to NFQUEUE
-	err = fm.ensureRule(cfg, "iptables", "-A", "FORWARD", "-i", wan, "-o", lan, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-m", "comment", "--comment", "IDPS-NFQ-IN", "-j", "NFQUEUE", "--queue-num", "0")
-	if err != nil {
-		return fmt.Errorf("failed to configure WAN->LAN nfqueue: %v", err)
-	}
-
-	// Route FORWARD WAN -> LAN to Suricata NFQUEUE
-	err = fm.ensureRule(cfg, "iptables", "-A", "FORWARD", "-i", wan, "-o", lan, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-m", "comment", "--comment", "SURICATA-NFQ-IN", "-j", "NFQUEUE", "--queue-num", "1")
-	if err != nil {
-		return fmt.Errorf("failed to configure WAN->LAN suricata nfqueue: %v", err)
-	}
-
-	// Route FORWARD LAN -> WAN to NFQUEUE
-	err = fm.ensureRule(cfg, "iptables", "-A", "FORWARD", "-i", lan, "-o", wan, "-m", "comment", "--comment", "IDPS-NFQ-OUT", "-j", "NFQUEUE", "--queue-num", "0")
-	if err != nil {
-		return fmt.Errorf("failed to configure LAN->WAN nfqueue: %v", err)
-	}
-
-	// Route FORWARD LAN -> WAN to Suricata NFQUEUE
-	err = fm.ensureRule(cfg, "iptables", "-A", "FORWARD", "-i", lan, "-o", wan, "-m", "comment", "--comment", "SURICATA-NFQ-OUT", "-j", "NFQUEUE", "--queue-num", "1")
-	if err != nil {
-		return fmt.Errorf("failed to configure LAN->WAN suricata nfqueue: %v", err)
-	}
-
-	// Setup Layer 2 MAC-based Isolation Chains (ebtables)
-	_ = fm.runCommand(cfg, "sudo", "ebtables", "-N", "IDPS-MAC-BLOCK")
-	_ = fm.runCommand(cfg, "sudo", "ebtables", "-P", "IDPS-MAC-BLOCK", "RETURN") // Default return
-	
-	// Hook custom chain into INPUT (stops gateway access) and FORWARD (stops client-to-client and WAN access)
-	// We ignore errors here in case ebtables isn't installed or already hooked
-	_ = fm.runCommand(cfg, "sudo", "ebtables", "-I", "INPUT", "-j", "IDPS-MAC-BLOCK")
-	_ = fm.runCommand(cfg, "sudo", "ebtables", "-I", "FORWARD", "-j", "IDPS-MAC-BLOCK")
-
-	fmt.Println("FirewallManager: Gateway NAT routing and L2 Isolation configured successfully.")
-	return nil
-}
-
-func (fm *FirewallManager) TeardownGateway(cfg *config.Config) {
+	// 2. Check if passive IDS mode
 	cfg.Mu.RLock()
-	mode := cfg.IDPSDeploymentMode
-	wan := cfg.WanInterface
-	lan := cfg.LanInterface
-	dryRun := cfg.FirewallDryRun
-	capIface := cfg.CaptureInterface
+	secMode := cfg.IDPSSecurityMode
 	cfg.Mu.RUnlock()
-
-	if mode == "HOST" {
-		if capIface != "" {
-			fm.runCommand(cfg, "sudo", "iptables", "-D", "INPUT", "-i", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-IN")
-			fm.runCommand(cfg, "sudo", "iptables", "-D", "INPUT", "-i", capIface, "-j", "NFQUEUE", "--queue-num", "1", "-m", "comment", "--comment", "SURICATA-NFQ-HOST-IN")
-			fm.runCommand(cfg, "sudo", "iptables", "-D", "OUTPUT", "-o", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-OUT")
-			fm.runCommand(cfg, "sudo", "iptables", "-D", "OUTPUT", "-o", capIface, "-j", "NFQUEUE", "--queue-num", "1", "-m", "comment", "--comment", "SURICATA-NFQ-HOST-OUT")
-		}
-		return
+	if secMode == "IDS" {
+		res.Status = BlockStatusRequested
+		res.Error = "System in passive IDS mode (enforcement skipped)"
+		audit.Get().Log("system:firewall", "BLOCK_PASSIVE_IDS", ip, "REQUESTED", res.Platform, "IDS mode: alert logged without active block")
+		return res
 	}
 
-	if mode != "GATEWAY" && mode != "NETWORK" {
-		return
-	}
-
-	fmt.Printf("FirewallManager: Tearing down Gateway NAT routing: WAN=%s, LAN=%s\n", wan, lan)
-
-	_ = fm.runCommand(cfg, "sudo", "iptables", "-t", "nat", "-D", "POSTROUTING", "-o", wan, "-m", "comment", "--comment", "IDPS-NAT", "-j", "MASQUERADE")
-	_ = fm.runCommand(cfg, "sudo", "iptables", "-D", "FORWARD", "-i", wan, "-o", lan, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-m", "comment", "--comment", "IDPS-NFQ-IN", "-j", "NFQUEUE", "--queue-num", "0")
-	_ = fm.runCommand(cfg, "sudo", "iptables", "-D", "FORWARD", "-i", wan, "-o", lan, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-m", "comment", "--comment", "SURICATA-NFQ-IN", "-j", "NFQUEUE", "--queue-num", "1")
-	_ = fm.runCommand(cfg, "sudo", "iptables", "-D", "FORWARD", "-i", lan, "-o", wan, "-m", "comment", "--comment", "IDPS-NFQ-OUT", "-j", "NFQUEUE", "--queue-num", "0")
-	_ = fm.runCommand(cfg, "sudo", "iptables", "-D", "FORWARD", "-i", lan, "-o", wan, "-m", "comment", "--comment", "SURICATA-NFQ-OUT", "-j", "NFQUEUE", "--queue-num", "1")
-
-	if fm.ipForwardOriginal == "0" && !dryRun {
-		_ = fm.runCommand(cfg, "sudo", "sysctl", "-w", "net.ipv4.ip_forward=0")
-	}
-
-	// Teardown Layer 2 MAC-based Isolation Chains
-	_ = fm.runCommand(cfg, "sudo", "ebtables", "-D", "INPUT", "-j", "IDPS-MAC-BLOCK")
-	_ = fm.runCommand(cfg, "sudo", "ebtables", "-D", "FORWARD", "-j", "IDPS-MAC-BLOCK")
-	_ = fm.runCommand(cfg, "sudo", "ebtables", "-F", "IDPS-MAC-BLOCK")
-	_ = fm.runCommand(cfg, "sudo", "ebtables", "-X", "IDPS-MAC-BLOCK")
-
-	fmt.Println("FirewallManager: Gateway NAT routing and L2 Isolation rules removed.")
-}
-
-func (fm *FirewallManager) BlockDevice(ip string, mac string, cfg *config.Config) bool {
-	cfg.Mu.RLock()
-	mode := cfg.IDPSDeploymentMode
-	cfg.Mu.RUnlock()
-
-	if mode != "HOST" && mode != "GATEWAY" && mode != "NETWORK" {
-		return false
-	}
-
+	// 3. Prevent duplicate active commands if recently confirmed
 	fm.mu.Lock()
-	if _, exists := fm.blockCache[ip]; exists {
-		// Already blocked. Extend TTL.
-		fm.blockCache[ip] = time.Now().Add(1 * time.Hour) // 1 hour block
+	if rec, exists := fm.blockCache[ip]; exists {
+		rec.expiresAt = expiresAt
+		fm.blockCache[ip] = rec
 		fm.mu.Unlock()
-		return true // Assume success since it's already there
+		res.Status = BlockStatusConfirmed
+		return res
 	}
 	fm.mu.Unlock()
 
-	if !fm.isSafeToBlock(ip, cfg) {
-		fmt.Printf("FirewallManager: Refused to block trusted/unsafe IP %s\n", ip)
+	// 4. Apply OS-specific block
+	err := fm.backend.ApplyBlock(ip, mac, cfg)
+	if err != nil {
+		res.Status = BlockStatusFailed
+		res.Error = err.Error()
+		audit.Get().Log("system:firewall", "BLOCK_APPLY_FAILED", ip, "FAILED", res.Platform, err.Error())
+		return res
+	}
+
+	// 5. Explicitly verify enforcement in kernel firewall
+	if !fm.backend.VerifyBlock(ip, cfg) {
+		res.Status = BlockStatusFailed
+		res.Error = "Firewall command executed but rule was not verified in kernel table"
+		audit.Get().Log("system:firewall", "BLOCK_VERIFY_FAILED", ip, "FAILED", res.Platform, res.Error)
+		return res
+	}
+
+	// Block confirmed! Cache and audit
+	res.Status = BlockStatusConfirmed
+	fm.mu.Lock()
+	fm.blockCache[ip] = blockRecord{
+		mac:       mac,
+		ruleID:    ruleID,
+		reason:    reason,
+		expiresAt: expiresAt,
+	}
+	if len(fm.history) >= 100 {
+		fm.history = fm.history[1:]
+	}
+	fm.history = append(fm.history, res)
+	fm.mu.Unlock()
+
+	audit.Get().Log("system:firewall", "BLOCK_CONFIRMED", ip, "CONFIRMED", res.Platform, fmt.Sprintf("Rule %s enforced. TTL: %v", ruleID, ttl))
+	return res
+}
+
+// BlockDevice is the backward-compatible entry point returning bool.
+func (fm *FirewallManager) BlockDevice(ip string, mac string, cfg *config.Config) bool {
+	res := fm.BlockDeviceWithResult(ip, mac, cfg, "Automated IDPS Threat Block", "")
+	return res.Status == BlockStatusConfirmed
+}
+
+// UnblockDevice removes an IP and MAC block with audited rollback.
+func (fm *FirewallManager) UnblockDevice(ip, mac string, cfg *config.Config) bool {
+	if ip == "" {
 		return false
 	}
 
-	bin := iptablesBin(ip)
-	success := true
+	err := fm.backend.RemoveBlock(ip, mac, cfg)
+	success := (err == nil)
 
-	if mode == "HOST" {
-		args := []string{"-I", "INPUT", "1", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP"}
-		if err := fm.ensureRule(cfg, bin, args...); err == nil {
-			fmt.Printf("FirewallManager: Added %s rule to block %s on INPUT\n", bin, ip)
-		} else {
-			fmt.Printf("FirewallManager: Failed to block %s on INPUT: %v\n", ip, err)
-			success = false
-		}
-	} else if mode == "GATEWAY" || mode == "NETWORK" {
-		args := []string{"-I", "FORWARD", "1", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP"}
-		if err := fm.ensureRule(cfg, bin, args...); err == nil {
-			fmt.Printf("FirewallManager: Added %s rule to block %s on FORWARD\n", bin, ip)
-		} else {
-			fmt.Printf("FirewallManager: Failed to block %s on FORWARD: %v\n", ip, err)
-			success = false
-		}
+	fm.mu.Lock()
+	delete(fm.blockCache, ip)
+	fm.mu.Unlock()
+
+	status := "CONFIRMED"
+	if !success {
+		status = "FAILED"
 	}
-
-	// Apply Layer 2 MAC Isolation if MAC is provided
-	if mac != "" {
-		macArgs := []string{"-I", "IDPS-MAC-BLOCK", "-s", mac, "-j", "DROP"}
-		if err := fm.runCommand(cfg, "sudo", append([]string{"ebtables"}, macArgs...)...); err == nil {
-			fmt.Printf("FirewallManager: Added ebtables rule to block MAC %s\n", mac)
-		} else {
-			fmt.Printf("FirewallManager: Failed to block MAC %s via ebtables: %v\n", mac, err)
-			// Don't fail the whole block if ebtables just isn't installed
-		}
-	}
-
-	if success {
-		fm.mu.Lock()
-		fm.blockCache[ip] = time.Now().Add(1 * time.Hour) // 1 hour block TTL
-		fm.mu.Unlock()
-	}
-
+	audit.Get().Log("system:firewall", "UNBLOCK", ip, status, platform.GetInfo().OS, "Removed block rule from firewall")
 	return success
 }
 
-func (fm *FirewallManager) UnblockDevice(ip string, mac string, cfg *config.Config) bool {
-	cfg.Mu.RLock()
-	mode := cfg.IDPSDeploymentMode
-	cfg.Mu.RUnlock()
+// VerifyBlock checks if a given IP block is verified in the kernel table.
+func (fm *FirewallManager) VerifyBlock(ip string, cfg *config.Config) bool {
+	return fm.backend.VerifyBlock(ip, cfg)
+}
 
-	if mode != "HOST" && mode != "GATEWAY" && mode != "NETWORK" {
-		return false
-	}
+// ttlSweeper regularly cleans up expired temporary blocks.
+func (fm *FirewallManager) ttlSweeper() {
+	for {
+		time.Sleep(5 * time.Second)
+		now := time.Now().UTC()
 
-	bin := iptablesBin(ip)
-	success := true
+		var expiredIPs []string
+		var expiredMACs []string
 
-	if mode == "HOST" {
-		if err := fm.runCommand(cfg, "sudo", bin, "-D", "INPUT", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP"); err == nil {
-			fmt.Printf("FirewallManager: Removed %s rule for %s from INPUT\n", bin, ip)
-		} else {
-			fmt.Printf("FirewallManager: Failed to unblock %s from INPUT: %v\n", ip, err)
-			success = false
+		fm.mu.Lock()
+		for ip, rec := range fm.blockCache {
+			if now.After(rec.expiresAt) {
+				expiredIPs = append(expiredIPs, ip)
+				expiredMACs = append(expiredMACs, rec.mac)
+			}
 		}
-	} else if mode == "GATEWAY" || mode == "NETWORK" {
-		if err := fm.runCommand(cfg, "sudo", bin, "-D", "FORWARD", "-s", ip, "-m", "comment", "--comment", "IDPS-BLOCK", "-j", "DROP"); err == nil {
-			fmt.Printf("FirewallManager: Removed %s rule for %s from FORWARD\n", bin, ip)
-		} else {
-			fmt.Printf("FirewallManager: Failed to unblock %s from FORWARD: %v\n", ip, err)
-			success = false
-		}
-	}
+		cfg := fm.cfg
+		fm.mu.Unlock()
 
-	if mac != "" {
-		if err := fm.runCommand(cfg, "sudo", "ebtables", "-D", "IDPS-MAC-BLOCK", "-s", mac, "-j", "DROP"); err == nil {
-			fmt.Printf("FirewallManager: Removed ebtables rule for MAC %s\n", mac)
-		} else {
-			fmt.Printf("FirewallManager: Failed to unblock MAC %s via ebtables: %v\n", mac, err)
+		for i, ip := range expiredIPs {
+			mac := expiredMACs[i]
+			_ = fm.backend.RemoveBlock(ip, mac, cfg)
+			fm.mu.Lock()
+			delete(fm.blockCache, ip)
+			fm.mu.Unlock()
+			audit.Get().Log("system:ttl_sweeper", "AUTO_UNBLOCK", ip, "CONFIRMED", platform.GetInfo().OS, "TTL expired; rule rolled back automatically")
 		}
 	}
-
-	return success
 }

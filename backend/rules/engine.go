@@ -34,7 +34,15 @@ func (e *Engine) AddRule(r *Rule) {
 	if len(r.Contents) > 0 {
 		firstContent := r.Contents[0]
 		if firstContent.Modifier.Nocase {
-			pid := e.NocaseMPSE.AddPattern(firstContent.Pattern)
+			lowerPat := make([]byte, len(firstContent.Pattern))
+			for i, b := range firstContent.Pattern {
+				if b >= 'A' && b <= 'Z' {
+					lowerPat[i] = b + 32
+				} else {
+					lowerPat[i] = b
+				}
+			}
+			pid := e.NocaseMPSE.AddPattern(lowerPat)
 			e.nocaseToRules[pid] = append(e.nocaseToRules[pid], ruleIdx)
 		} else {
 			pid := e.MPSE.AddPattern(firstContent.Pattern)

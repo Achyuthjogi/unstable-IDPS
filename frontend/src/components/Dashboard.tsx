@@ -168,74 +168,170 @@ export default function Dashboard({ data, status }: { data: any; status: string 
   }
 
   const { system, network, alerts, devices, blocked, traffic_log } = data;
+  const platform = data.platform || {
+    os: 'linux',
+    arch: 'amd64',
+    hostname: 'sensor-host',
+    is_elevated: true,
+    capture_driver: 'AF_PACKET',
+    firewall_backend: 'iptables',
+    has_inline_engine: true,
+  };
+  const telemetry = data.telemetry || {
+    cpu_percent: system?.cpu || 0,
+    memory_percent: system?.memory || 0,
+    uptime_seconds: 0,
+    goroutine_count: 0,
+  };
+  const metrics = data.metrics || {};
+  const isWindows = (platform.os || '').toLowerCase() === 'windows';
+
+  const formatUptime = (seconds: number) => {
+    if (!seconds) return 'Live';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  };
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-12">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      {/* Enterprise Header with Sensor & OS Health */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
-          <h2 className="text-3xl font-bold tracking-tight">Security Overview</h2>
-          <p className="text-muted-foreground">Real-time threat monitoring and mitigation</p>
+          <div className="flex items-center gap-3">
+            <h2 className="text-3xl font-bold tracking-tight">Security Operations Center</h2>
+            <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold font-mono uppercase tracking-wider flex items-center gap-1.5 ${
+              isWindows
+                ? 'bg-sky-500/10 text-sky-400 border border-sky-500/30'
+                : 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+            }`}>
+              <span>{isWindows ? '🪟 Windows' : '🐧 Linux'}</span>
+              <span className="text-[10px] opacity-75">({platform.arch})</span>
+            </span>
+            <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider ${
+              platform.is_elevated
+                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                : 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
+            }`}>
+              {platform.is_elevated ? (isWindows ? 'Admin Privileges' : 'Root Privileges') : 'Unprivileged'}
+            </span>
+          </div>
+          <p className="text-muted-foreground text-sm mt-0.5">
+            Engine: <span className="text-primary font-mono font-medium">{platform.capture_driver || 'AF_PACKET'}</span> &bull; Firewall: <span className="text-primary font-mono font-medium">{platform.firewall_backend || 'iptables'}</span>
+          </p>
         </div>
-        <div className="flex items-center gap-4 kinetic-card px-4 py-2 rounded-xl">
+
+        {/* Telemetry Bar */}
+        <div className="flex flex-wrap items-center gap-3 kinetic-card px-4 py-2.5 rounded-xl text-xs">
           <div className="flex items-center gap-2">
             <span className={`w-2.5 h-2.5 rounded-full ${status === 'connected' ? 'bg-green-500' : 'bg-red-500'} animate-pulse`} />
-            <span className="text-sm font-medium">{status === 'connected' ? 'Engine Online' : 'Connecting...'}</span>
+            <span className="font-semibold">{status === 'connected' ? 'Sensor Online' : 'Connecting...'}</span>
           </div>
-          <div className="w-px h-6 bg-border" />
-          <div className="flex items-center gap-2 text-sm">
-            <Cpu className="w-4 h-4 text-muted-foreground" />
-            <span className="font-mono">{system.cpu.toFixed(1)}%</span>
+          <div className="w-px h-5 bg-border/40" />
+          <div className="flex items-center gap-1.5">
+            <Cpu className="w-3.5 h-3.5 text-muted-foreground" />
+            <span className="font-mono">{system.cpu.toFixed(1)}% CPU</span>
           </div>
-          <div className="w-px h-6 bg-border" />
-          <div className="flex items-center gap-2 text-sm" title="Gateway IP Address">
-            <Network className="w-4 h-4 text-muted-foreground" />
-            <span className="font-mono">{system.gateway_ip || 'Unknown IP'}</span>
+          <div className="w-px h-5 bg-border/40" />
+          <div className="flex items-center gap-1.5">
+            <Network className="w-3.5 h-3.5 text-muted-foreground" />
+            <span className="font-mono">{system.gateway_ip || 'Local Host'}</span>
           </div>
-          <div className="w-px h-6 bg-border" />
+          <div className="w-px h-5 bg-border/40" />
+          <div className="flex items-center gap-1.5 font-mono text-muted-foreground">
+            <span>Uptime: {formatUptime(telemetry.uptime_seconds)}</span>
+          </div>
+          <div className="w-px h-5 bg-border/40" />
           <div
-            className="flex items-center gap-2 text-sm"
+            className="flex items-center gap-1.5"
             title={system.ml_enabled !== false ? 'AI/ML Model Active: Inbound flows analyzed for zero-day anomalies' : 'AI/ML Model Disabled: ML inference bypassed'}
           >
-            <BrainCircuit className={`w-4 h-4 ${system.ml_enabled !== false ? 'text-purple-400' : 'text-muted-foreground'}`} />
-            <span className={`px-2 py-0.5 text-xs font-semibold rounded-full border ${
+            <BrainCircuit className={`w-3.5 h-3.5 ${system.ml_enabled !== false ? 'text-purple-400' : 'text-muted-foreground'}`} />
+            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
               system.ml_enabled !== false
                 ? 'bg-purple-500/20 text-purple-400 border-purple-500/30'
                 : 'bg-muted/40 text-muted-foreground border-border/30'
             }`}>
-              ML: {system.ml_enabled !== false ? 'Active' : 'Disabled'}
+              ML: {system.ml_enabled !== false ? 'Active' : 'Bypassed'}
             </span>
           </div>
         </div>
       </div>
 
-      {/* KPI Cards */}
+      {/* Packet & Flow Telemetry Banner */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div className="kinetic-card rounded-xl p-3 text-left">
+          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Captured</span>
+          <span className="text-xl font-bold font-mono text-primary text-glow">
+            {(metrics.packets_captured || network.packet_count || 0).toLocaleString()}
+          </span>
+          <span className="text-[10px] text-muted-foreground block">Zero-copy packets</span>
+        </div>
+        <div className="kinetic-card rounded-xl p-3 text-left">
+          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Inspected</span>
+          <span className="text-xl font-bold font-mono text-emerald-400">
+            {(metrics.packets_inspected || network.packet_count || 0).toLocaleString()}
+          </span>
+          <span className="text-[10px] text-muted-foreground block">Deep decoded pkts</span>
+        </div>
+        <div className="kinetic-card rounded-xl p-3 text-left">
+          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Active Flows</span>
+          <span className="text-xl font-bold font-mono text-sky-400">
+            {(metrics.active_flows || system.active_connections || 0).toLocaleString()}
+          </span>
+          <span className="text-[10px] text-muted-foreground block">4-tuple tracked</span>
+        </div>
+        <div className="kinetic-card rounded-xl p-3 text-left">
+          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Block Confirmed</span>
+          <span className="text-xl font-bold font-mono text-emerald-400">
+            {(metrics.blocks_confirmed || network.blocked_ips_count || 0).toLocaleString()}
+          </span>
+          <span className="text-[10px] text-emerald-500/70 block">Firewall verified</span>
+        </div>
+        <div className="kinetic-card rounded-xl p-3 text-left">
+          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Block Requested</span>
+          <span className="text-xl font-bold font-mono text-amber-400">
+            {(metrics.blocks_requested || 0).toLocaleString()}
+          </span>
+          <span className="text-[10px] text-amber-500/70 block">Dispatched</span>
+        </div>
+        <div className="kinetic-card rounded-xl p-3 text-left">
+          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Packets Dropped</span>
+          <span className={`text-xl font-bold font-mono ${(metrics.packets_dropped || 0) > 0 ? 'text-rose-400' : 'text-muted-foreground'}`}>
+            {(metrics.packets_dropped || 0).toLocaleString()}
+          </span>
+          <span className="text-[10px] text-muted-foreground block">Ring buffer drops</span>
+        </div>
+      </div>
+
+      {/* Primary KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiCard
-          title="Active Devices"
+          title="Monitored Endpoints"
           value={devices.length.toString()}
           icon={<Network className="text-emerald-500" />}
-          trend="Click to view details"
+          trend="Click to inspect inventory"
           onClick={openDevices}
         />
         <KpiCard
           title="Active Alerts"
           value={network.alerts_count.toString()}
           icon={<AlertOctagon className="text-amber-500" />}
-          trend={alerts.length > 0 ? "Requires attention" : "All clear"}
+          trend={alerts.length > 0 ? "Threats detected" : "All clear"}
           alert={alerts.length > 0}
         />
         <KpiCard
-          title="Blocked Threats"
+          title="Active IP Blocks"
           value={network.blocked_ips_count.toString()}
           icon={<ShieldAlert className="text-red-500" />}
-          trend="Automatically mitigated"
+          trend="Enforced in OS firewall"
         />
         <div className="kinetic-card rounded-2xl p-4 flex flex-col h-[130px] overflow-hidden relative">
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-sm font-medium text-muted-foreground flex items-center gap-1">
               <Activity className="w-4 h-4 text-blue-500" />
-              Live Traffic
+              Live Traffic Stream
             </h3>
             <div className="flex items-center gap-2">
               <span className="text-xs text-primary font-mono">{network.packet_count.toLocaleString()} pkts</span>
@@ -331,12 +427,51 @@ export default function Dashboard({ data, status }: { data: any; status: string 
                   <ShieldAlert className="w-5 h-5" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between mb-1">
-                    <h4 className="font-semibold text-sm truncate">{alert.type}</h4>
-                    <span className="text-xs text-muted-foreground">{format(new Date(alert.timestamp * 1000), 'HH:mm:ss')}</span>
+                  <div className="flex items-center justify-between mb-1 gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-semibold text-sm truncate">{alert.type}</h4>
+                      {alert.action === 'BLOCK_CONFIRMED' && (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                          CONFIRMED BLOCK
+                        </span>
+                      )}
+                      {alert.action === 'BLOCK_REQUESTED' && (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+                          BLOCK REQUESTED
+                        </span>
+                      )}
+                      {alert.action === 'BLOCK_FAILED' && (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/30">
+                          BLOCK FAILED
+                        </span>
+                      )}
+                      {(!alert.action || alert.action === 'DETECTED') && (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/10 text-blue-400 border border-blue-500/30">
+                          DETECTED
+                        </span>
+                      )}
+                      {alert.platform && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-mono uppercase bg-white/5 text-muted-foreground border border-border/20">
+                          {alert.platform}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {alert.confidence > 0 && (
+                        <span className="text-[10px] font-mono text-emerald-400 font-semibold">
+                          {(alert.confidence * 100).toFixed(0)}% Conf
+                        </span>
+                      )}
+                      <span className="text-xs text-muted-foreground">{format(new Date(alert.timestamp * 1000), 'HH:mm:ss')}</span>
+                    </div>
                   </div>
-                  <p className="text-sm text-muted-foreground mb-2">{alert.reason}</p>
-                  <div className="flex gap-2 text-xs font-mono kinetic-card p-2 rounded-lg inline-flex mt-2">
+                  <p className="text-sm text-muted-foreground mb-1">{alert.reason}</p>
+                  {alert.evidence && (
+                    <p className="text-xs font-mono text-muted-foreground/80 bg-black/20 px-2 py-1 rounded mb-2 border border-white/5 truncate" title={alert.evidence}>
+                      Evidence: {alert.evidence}
+                    </p>
+                  )}
+                  <div className="flex gap-2 text-xs font-mono kinetic-card p-2 rounded-lg inline-flex mt-1">
                     <span className="text-muted-foreground">SRC:</span>
                     <span className={blockedIPs.includes(alert.source_ip) ? 'text-red-400 line-through' : ''}>{alert.source_ip}</span>
                     <span className="text-muted-foreground ml-2">DST:</span> {alert.dest_ip}
@@ -598,3 +733,4 @@ export default function Dashboard({ data, status }: { data: any; status: string 
     </div>
   );
 }
+

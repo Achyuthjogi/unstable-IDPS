@@ -72,6 +72,11 @@ export const useWebSocket = (
 
       ws.onerror = () => {
         setStatus('error');
+        try {
+          if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+            ws.close();
+          }
+        } catch (_) {}
       };
     };
 

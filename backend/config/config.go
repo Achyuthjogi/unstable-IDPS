@@ -1,15 +1,12 @@
 package config
 
 import (
-	"encoding/hex"
 	"fmt"
-	"net"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"bufio"
 
 	"github.com/joho/godotenv"
 )
@@ -18,6 +15,9 @@ type Config struct {
 	Mu sync.RWMutex
 	
 	APIKey                  string
+	AdminAPIKey             string
+	AnalystAPIKey           string
+	ViewerAPIKey            string
 	AllowedOrigins          []string
 	IDPSDeploymentMode      string
 	IDPSSecurityMode        string
@@ -47,56 +47,35 @@ type Config struct {
 	// ML Service Config
 	MLServiceURL string
 	MLEnabled    bool
+
+	// Suricata Primary Engine Config
+	SuricataPrimaryEngine bool
+	SuricataEvePath       string
+	SuricataConfigPath    string
+	SuricataBinaryPath    string
 }
 
-func DiscoverInterfaces() (string, string) {
-	var wan, lan string
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return "", ""
-	}
+// Validate ensures enterprise-grade sanity of configuration parameters.
+func (c *Config) Validate() error {
+	c.Mu.RLock()
+	defer c.Mu.RUnlock()
 
-	for _, i := range ifaces {
-		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		name := i.Name
-		if strings.HasPrefix(name, "wlan") || strings.HasPrefix(name, "wlp") {
-			if lan == "" {
-				lan = name
-			}
-		} else if strings.HasPrefix(name, "eth") || strings.HasPrefix(name, "enx") || strings.HasPrefix(name, "enp") {
-			if wan == "" {
-				wan = name
-			}
-		}
+	if c.WorkerCount <= 0 {
+		return fmt.Errorf("WORKER_COUNT must be > 0 (got %d)", c.WorkerCount)
 	}
-	return wan, lan
-}
-
-func DiscoverGatewayIP() string {
-	file, err := os.Open("/proc/net/route")
-	if err != nil {
-		return ""
+	if c.BlockTTLSeconds <= 0 {
+		return fmt.Errorf("BLOCK_TTL_SECONDS must be > 0 (got %d)", c.BlockTTLSeconds)
 	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 3 && fields[1] == "00000000" {
-			gwHex := fields[2]
-			if len(gwHex) == 8 {
-				ipBytes, err := hex.DecodeString(gwHex)
-				if err == nil {
-					// Little-endian format
-					ip := net.IPv4(ipBytes[3], ipBytes[2], ipBytes[1], ipBytes[0])
-					return ip.String()
-				}
-			}
-		}
+	if c.PortScanThreshold <= 0 {
+		return fmt.Errorf("PORT_SCAN_THRESHOLD must be > 0 (got %d)", c.PortScanThreshold)
 	}
-	return ""
+	if c.SYNFloodThreshold <= 0 {
+		return fmt.Errorf("SYN_FLOOD_THRESHOLD must be > 0 (got %d)", c.SYNFloodThreshold)
+	}
+	if c.MaxFlows <= 100 {
+		return fmt.Errorf("MAX_FLOWS must be at least 100 (got %d)", c.MaxFlows)
+	}
+	return nil
 }
 
 func Load() *Config {
@@ -121,6 +100,9 @@ func Load() *Config {
 
 	cfg := &Config{
 		APIKey:                  apiKey,
+		AdminAPIKey:             getEnv("ADMIN_API_KEY", apiKey),
+		AnalystAPIKey:           getEnv("ANALYST_API_KEY", ""),
+		ViewerAPIKey:            getEnv("VIEWER_API_KEY", ""),
 		AllowedOrigins:          origins,
 		IDPSDeploymentMode:      getEnv("IDPS_DEPLOYMENT_MODE", "HOST"), // HOST or NETWORK
 		IDPSSecurityMode:        getEnv("IDPS_SECURITY_MODE", "IDS"),    // IDS or IPS
@@ -144,6 +126,10 @@ func Load() *Config {
 		MaxReassembly:           getEnvInt("MAX_REASSEMBLY", 65535),
 		MLServiceURL:            getEnv("ML_SERVICE_URL", "http://localhost:5001"),
 		MLEnabled:               getEnvBool("ML_ENABLED", true),
+		SuricataPrimaryEngine:   getEnvBool("SURICATA_PRIMARY_ENGINE", true),
+		SuricataEvePath:         getEnv("SURICATA_EVE_PATH", ""),
+		SuricataConfigPath:      getEnv("SURICATA_CONFIG_PATH", ""),
+		SuricataBinaryPath:      getEnv("SURICATA_BINARY_PATH", ""),
 	}
 
 	cfg.Interface = getEnv("INTERFACE", cfg.LanInterface)
@@ -186,6 +172,9 @@ func (c *Config) Clone() *Config {
 	defer c.Mu.RUnlock()
 	return &Config{
 		APIKey:                  c.APIKey,
+		AdminAPIKey:             c.AdminAPIKey,
+		AnalystAPIKey:           c.AnalystAPIKey,
+		ViewerAPIKey:            c.ViewerAPIKey,
 		AllowedOrigins:          c.AllowedOrigins,
 		IDPSDeploymentMode:      c.IDPSDeploymentMode,
 		IDPSSecurityMode:        c.IDPSSecurityMode,

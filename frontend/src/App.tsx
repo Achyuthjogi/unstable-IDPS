@@ -1,9 +1,11 @@
 import { useState, useEffect, Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
-import { Activity, AlertTriangle, ShieldOff, Settings, Network, AlertOctagon, Ban, BrainCircuit } from 'lucide-react';
+import { Activity, AlertTriangle, ShieldOff, Settings, Network, AlertOctagon, Ban, BrainCircuit, Server, FileText, CheckCircle2, Clock } from 'lucide-react';
 import Dashboard from './components/Dashboard';
 import AttackDetectionView from './components/AttackDetectionView';
+import HostInventory from './components/HostInventory';
+import AuditHistory from './components/AuditHistory';
 import ThreeDBackground from './components/ThreeDBackground';
 import { useWebSocket } from './hooks/useWebSocket';
 import { format } from 'date-fns';
@@ -52,16 +54,17 @@ function App() {
             <NavItem icon={<Activity />} label="Overview" path="/" active={activeTab === 'overview'} onClick={() => setActiveTab('overview')} />
             <NavItem icon={<AlertTriangle />} label="Alerts" path="/alerts" active={activeTab === 'alerts'} onClick={() => setActiveTab('alerts')} />
             <NavItem icon={<ShieldOff />} label="Blocked IPs" path="/blocked" active={activeTab === 'blocked'} onClick={() => setActiveTab('blocked')} />
-
+            <NavItem icon={<Server />} label="Host Inventory" path="/inventory" active={activeTab === 'inventory'} onClick={() => setActiveTab('inventory')} />
+            <NavItem icon={<FileText />} label="Audit Trail" path="/audit" active={activeTab === 'audit'} onClick={() => setActiveTab('audit')} />
             <NavItem icon={<Settings />} label="Settings" path="/settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
           </nav>
           
           <div className="p-4 border-t border-border text-xs text-muted-foreground">
             <div className="flex justify-between items-center">
-              <span>v1.0.0</span>
+              <span>v2.0 Enterprise</span>
               <span className="flex items-center gap-1">
                 <span className={`w-2 h-2 rounded-full ${status === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
-                {status === 'connected' ? 'System Active' : 'Disconnected'}
+                {status === 'connected' ? 'Sensor Active' : 'Disconnected'}
               </span>
             </div>
           </div>
@@ -74,8 +77,9 @@ function App() {
               <Route path="/" element={<Dashboard data={data} status={status} />} />
               <Route path="/alerts" element={<AlertsView data={data} />} />
               <Route path="/blocked" element={<BlockedIPsView data={data} />} />
+              <Route path="/inventory" element={<HostInventory data={data} />} />
+              <Route path="/audit" element={<AuditHistory data={data} />} />
               <Route path="/attackdect" element={<AttackDetectionView />} />
-
               <Route path="/settings" element={<SettingsView />} />
             </Routes>
           </div>
@@ -135,7 +139,10 @@ function AlertsView({ data }: { data: any }) {
     <div className="space-y-6 max-w-5xl mx-auto">
       <div className="flex items-center gap-3 mb-8">
         <AlertTriangle className="w-8 h-8 text-amber-500" />
-        <h2 className="text-3xl font-bold">Active Alerts</h2>
+        <div>
+          <h2 className="text-3xl font-bold">Threat Detection & Alerts</h2>
+          <p className="text-sm text-muted-foreground">Real-time alerts with verified enforcement, evidence telemetry, and platform context</p>
+        </div>
       </div>
       <div className="kinetic-card rounded-2xl p-6">
         {alerts.filter((a: any) => !blockedIPs.includes(a.source_ip)).length === 0 ? (
@@ -148,14 +155,56 @@ function AlertsView({ data }: { data: any }) {
                   <AlertOctagon className="w-5 h-5" />
                 </div>
                 <div className="flex-1">
-                  <h4 className="font-semibold">{alert.type} - {alert.severity} Severity</h4>
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-semibold text-base">{alert.type} - {alert.severity} Severity</h4>
+                      {alert.action === 'BLOCK_CONFIRMED' && (
+                        <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                          CONFIRMED BLOCK
+                        </span>
+                      )}
+                      {alert.action === 'BLOCK_REQUESTED' && (
+                        <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+                          BLOCK REQUESTED
+                        </span>
+                      )}
+                      {alert.action === 'BLOCK_FAILED' && (
+                        <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-500/10 text-rose-400 border border-rose-500/30">
+                          BLOCK FAILED
+                        </span>
+                      )}
+                      {(!alert.action || alert.action === 'DETECTED') && (
+                        <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-500/10 text-blue-400 border border-blue-500/30">
+                          DETECTED
+                        </span>
+                      )}
+                      {alert.platform && (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-white/5 text-muted-foreground border border-border/20">
+                          {alert.platform}
+                        </span>
+                      )}
+                    </div>
+                    {alert.confidence > 0 && (
+                      <span className="text-xs font-mono text-emerald-400 font-semibold">
+                        {(alert.confidence * 100).toFixed(0)}% Confidence
+                      </span>
+                    )}
+                  </div>
+
                   <p className="text-sm text-muted-foreground mt-1">{alert.reason}</p>
+
+                  {alert.evidence && (
+                    <div className="mt-2 text-xs font-mono text-muted-foreground/90 bg-black/25 px-3 py-1.5 rounded-lg border border-white/5">
+                      <span className="text-primary font-semibold">Evidence: </span>{alert.evidence}
+                    </div>
+                  )}
+
                   <div className="text-xs font-mono mt-2 bg-background/50 inline-block p-1 rounded flex gap-2 items-center">
                     <span className="text-muted-foreground">SRC:</span> 
                     <span className={blockedIPs.includes(alert.source_ip) ? 'text-red-400 line-through' : ''}>{alert.source_ip}</span>
                     <span className="text-muted-foreground ml-2">DST:</span> {alert.dest_ip}
                   </div>
-                  <div className="text-xs text-muted-foreground mt-2 flex justify-between items-center w-full">
+                  <div className="text-xs text-muted-foreground mt-3 flex justify-between items-center w-full">
                     <span>{format(new Date(alert.timestamp * 1000), 'MMM dd, yyyy HH:mm:ss')}</span>
                     <div className="flex gap-2">
                       <button 
@@ -207,27 +256,72 @@ function BlockedIPsView({ data }: { data: any }) {
     <div className="space-y-6 max-w-5xl mx-auto">
       <div className="flex items-center gap-3 mb-8">
         <ShieldOff className="w-8 h-8 text-red-500" />
-        <h2 className="text-3xl font-bold">Blocked IPs List</h2>
+        <div>
+          <h2 className="text-3xl font-bold">Active Firewall Blocks</h2>
+          <p className="text-sm text-muted-foreground">Enforced firewall rules verified in native OS kernel (iptables on Linux, netsh/WFP on Windows)</p>
+        </div>
       </div>
       <div className="kinetic-card rounded-2xl p-6">
-        {blocked.length === 0 ? (
+        {(!blocked || blocked.length === 0) ? (
           <div className="text-center text-muted-foreground py-12">No IPs are currently blocked.</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {blocked.map((block: any) => {
               const ip = typeof block === 'string' ? block : block.ip;
+              const status = typeof block === 'object' && block.status ? block.status : 'CONFIRMED';
+              const direction = typeof block === 'object' && block.direction ? block.direction : 'BOTH';
+              const platform = typeof block === 'object' && block.platform ? block.platform : 'linux';
+              const duration = typeof block === 'object' && block.duration ? block.duration : 0;
+              const reason = typeof block === 'object' && block.reason ? block.reason : 'Automated IPS Mitigation';
+
               return (
-              <div key={ip} className="p-4 rounded-xl kinetic-card flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <Ban className="w-5 h-5 text-red-500" />
-                  <span className="font-mono">{ip}</span>
+              <div key={ip} className="p-4 rounded-xl kinetic-card flex flex-col justify-between gap-3 border border-border/30">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-2">
+                    <Ban className="w-5 h-5 text-red-500" />
+                    <span className="font-mono font-bold text-base">{ip}</span>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    status === 'CONFIRMED' 
+                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' 
+                      : status === 'PENDING'
+                      ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                      : 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
+                  }`}>
+                    {status}
+                  </span>
                 </div>
-                <button 
-                  onClick={() => handleUnblock(ip)}
-                  className="kinetic-card hover:bg-green-500/10 text-green-500 px-3 py-1.5 rounded-lg text-xs transition-all font-medium"
-                >
-                  Unblock
-                </button>
+
+                <div className="space-y-1 text-xs text-muted-foreground">
+                  <div className="flex justify-between">
+                    <span>Reason:</span>
+                    <span className="text-foreground font-medium truncate max-w-[160px]" title={reason}>{reason}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Direction:</span>
+                    <span className="font-mono uppercase text-foreground">{direction}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Enforcement Platform:</span>
+                    <span className="font-mono uppercase text-primary">{platform}</span>
+                  </div>
+                  {duration > 0 && (
+                    <div className="flex justify-between">
+                      <span>TTL Duration:</span>
+                      <span className="font-mono text-amber-400">{duration}s</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-2 border-t border-border/20 flex justify-end">
+                  <button 
+                    onClick={() => handleUnblock(ip)}
+                    className="kinetic-card hover:bg-green-500/10 text-green-500 px-3 py-1.5 rounded-lg text-xs transition-all font-medium flex items-center gap-1.5"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    Unblock IP
+                  </button>
+                </div>
               </div>
             )})}
           </div>
@@ -495,3 +589,4 @@ function NavItem({ icon, label, path, active, onClick }: { icon: React.ReactNode
 }
 
 export default App;
+

@@ -522,19 +522,23 @@ func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 	if secMode == "IDS" {
 		alert.Action = "ALERT"
 		alert.ActionResult = "SUCCESS"
-		alert.Status = "LOGGED"
+		alert.Status = "DETECTED"
+		st.BlocksRequested++
 	} else {
 		if severity == "High" || severity == "Critical" || confidence == "High" || confidence == "Critical" {
 			alert.Action = "BLOCK"
+			st.BlocksRequested++
 
 			// Drop the lock to perform potentially slow firewall operation
 			st.Mu.Unlock()
-			blockSuccess := fm.BlockDevice(srcIP, srcMAC, cfg)
+			blockRes := fm.BlockDeviceWithResult(srcIP, srcMAC, cfg, reason, ruleID)
 			st.Mu.Lock()
 
-			if blockSuccess {
+			alert.Platform = blockRes.Platform
+			if blockRes.Status == firewall.BlockStatusConfirmed {
 				alert.ActionResult = "SUCCESS"
-				alert.Status = "BLOCKED"
+				alert.Status = "BLOCK_CONFIRMED"
+				st.BlocksConfirmed++
 				expiresAt := currentTime + float64(ttl)
 				alert.ExpiresAt = expiresAt
 
@@ -544,6 +548,8 @@ func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 					RuleID:     ruleID,
 					Reason:     reason,
 					Confidence: confidence,
+					Status:     string(blockRes.Status),
+					Platform:   blockRes.Platform,
 					CreatedAt:  currentTime,
 					ExpiresAt:  expiresAt,
 				}
@@ -558,14 +564,20 @@ func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 					Event:     fmt.Sprintf("Blocked IP %s (Rule: %s)", srcIP, ruleID),
 					Severity:  severity,
 				})
+			} else if blockRes.Status == firewall.BlockStatusRequested {
+				alert.ActionResult = "REQUESTED"
+				alert.Status = "BLOCK_REQUESTED"
+				st.BlocksRequested++
 			} else {
 				alert.ActionResult = "FAILED"
 				alert.Status = "BLOCK_FAILED"
+				alert.Evidence = blockRes.Error
+				st.BlocksFailed++
 			}
 		} else {
 			alert.Action = "ALERT"
 			alert.ActionResult = "SUCCESS"
-			alert.Status = "LOGGED (BELOW THRESHOLD)"
+			alert.Status = "DETECTED"
 		}
 	}
 

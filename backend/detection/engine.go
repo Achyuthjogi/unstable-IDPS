@@ -281,8 +281,10 @@ func (e *Engine) ProcessPacket(packet PacketInfo) bool {
 						reason += " [Correlated with prior signature/heuristic alert]"
 					}
 					
-					// Inbound-initiated flow — this is a real attacker. Block them.
-					triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, fmt.Sprintf("ML: %s Detected", resp.Prediction), severity, "High", attackerIP, pktDstIP, reason, resp.Confidence, pktSrcMAC)
+					// Inbound-initiated flow — verify target is not loopback or local host before executing block
+					if attackerIP != "127.0.0.1" && attackerIP != "::1" && !isLocalIP(attackerIP) {
+						triggerAlert(e.State, e.Config, e.Firewall, e.AlertLogger, float64(time.Now().UnixNano())/1e9, ruleID, fmt.Sprintf("ML: %s Detected", resp.Prediction), severity, "High", attackerIP, pktDstIP, reason, resp.Confidence, pktSrcMAC)
+					}
 					e.State.Mu.Unlock()
 				}
 			}()

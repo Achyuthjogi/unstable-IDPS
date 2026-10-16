@@ -24,11 +24,11 @@ func (r *Rule) Match(payload []byte) bool {
 		}
 		
 		end := len(payload)
-		if content.Modifier.Depth >= 0 {
+		if content.Modifier.Depth > 0 {
 			if start + content.Modifier.Depth <= end {
 				end = start + content.Modifier.Depth
 			}
-		} else if content.Modifier.Within >= 0 {
+		} else if content.Modifier.Within > 0 {
 			if start + content.Modifier.Within <= end {
 				end = start + content.Modifier.Within
 			}
@@ -43,7 +43,8 @@ func (r *Rule) Match(payload []byte) bool {
 		var matchIdx int
 		if content.Modifier.Nocase {
 			lowerBuf := bytes.ToLower(searchBuf)
-			matchIdx = bytes.Index(lowerBuf, content.Pattern)
+			lowerPat := bytes.ToLower(content.Pattern)
+			matchIdx = bytes.Index(lowerBuf, lowerPat)
 		} else {
 			matchIdx = bytes.Index(searchBuf, content.Pattern)
 		}

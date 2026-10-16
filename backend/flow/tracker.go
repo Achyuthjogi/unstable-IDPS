@@ -18,23 +18,23 @@ const (
 
 // Flow represents a network connection.
 type Flow struct {
-	Key          Key
-	State        State
-	LastSeen     time.Time
-	PacketCount  uint64
-	ByteCount    uint64
-	Mu           sync.Mutex
+	Key         Key
+	State       State
+	LastSeen    time.Time
+	PacketCount uint64
+	ByteCount   uint64
+	Mu          sync.Mutex
 
 	// Stream reassembly
 	ClientStream *StreamReassembler
 	ServerStream *StreamReassembler
 
 	// Track original direction to determine Client/Server
-	OriginalSrcIP [16]byte
+	OriginalSrcIP   [16]byte
 	OriginalSrcPort uint16
 
 	// ── ML Feature Tracking ──────────────────────────────────────────────
-	CreatedAt    time.Time
+	CreatedAt time.Time
 
 	// Directional packet/byte counts
 	FwdPacketCount uint64
@@ -86,10 +86,10 @@ type Flow struct {
 
 	// ── Bulk tracking (CICFlowMeter definition: run of ≥4 consecutive
 	// same-direction packets with no gap >1s between them) ────────────────
-	FwdBulkBytes, BwdBulkBytes       uint64
-	FwdBulkPackets, BwdBulkPackets   uint64
+	FwdBulkBytes, BwdBulkBytes           uint64
+	FwdBulkPackets, BwdBulkPackets       uint64
 	FwdBulkDurationUs, BwdBulkDurationUs float64 // sum of completed-bulk durations (us)
-	FwdBulkCount, BwdBulkCount       uint64
+	FwdBulkCount, BwdBulkCount           uint64
 
 	// In-progress (not-yet-closed) bulk run state. Exported so the
 	// detection package can peek at it when extracting live features
@@ -295,17 +295,33 @@ func (t *Tracker) UpdateFlowML(f *Flow, pktSrcIP [16]byte, pktSrcPort uint16, pa
 	}
 
 	// ── TCP flags ────────────────────────────────────────────────────────
-	if tcpFlags&0x02 != 0 { f.SYNCount++ }
-	if tcpFlags&0x01 != 0 { f.FINCount++ }
-	if tcpFlags&0x04 != 0 { f.RSTCount++ }
+	if tcpFlags&0x02 != 0 {
+		f.SYNCount++
+	}
+	if tcpFlags&0x01 != 0 {
+		f.FINCount++
+	}
+	if tcpFlags&0x04 != 0 {
+		f.RSTCount++
+	}
 	if tcpFlags&0x08 != 0 {
 		f.PSHCount++
-		if isClientToServer { f.FwdPSHFlags++ } else { f.BwdPSHFlags++ }
+		if isClientToServer {
+			f.FwdPSHFlags++
+		} else {
+			f.BwdPSHFlags++
+		}
 	}
-	if tcpFlags&0x10 != 0 { f.ACKCount++ }
+	if tcpFlags&0x10 != 0 {
+		f.ACKCount++
+	}
 	if tcpFlags&0x20 != 0 {
 		f.URGCount++
-		if isClientToServer { f.FwdURGFlags++ } else { f.BwdURGFlags++ }
+		if isClientToServer {
+			f.FwdURGFlags++
+		} else {
+			f.BwdURGFlags++
+		}
 	}
 
 	// ── Initial window sizes ─────────────────────────────────────────────
@@ -381,42 +397,66 @@ func (t *Tracker) pruneLoop() {
 // ── Statistical helpers for ML feature extraction ────────────────────────────
 
 func SliceMean(s []float64) float64 {
-	if len(s) == 0 { return 0 }
+	if len(s) == 0 {
+		return 0
+	}
 	sum := 0.0
-	for _, v := range s { sum += v }
+	for _, v := range s {
+		sum += v
+	}
 	return sum / float64(len(s))
 }
 
 func SliceStd(s []float64) float64 {
-	if len(s) < 2 { return 0 }
+	if len(s) < 2 {
+		return 0
+	}
 	m := SliceMean(s)
 	sum := 0.0
-	for _, v := range s { sum += (v - m) * (v - m) }
+	for _, v := range s {
+		sum += (v - m) * (v - m)
+	}
 	return math.Sqrt(sum / float64(len(s)))
 }
 
 func SliceMax(s []float64) float64 {
-	if len(s) == 0 { return 0 }
+	if len(s) == 0 {
+		return 0
+	}
 	mx := s[0]
-	for _, v := range s { if v > mx { mx = v } }
+	for _, v := range s {
+		if v > mx {
+			mx = v
+		}
+	}
 	return mx
 }
 
 func SliceMin(s []float64) float64 {
-	if len(s) == 0 { return 0 }
+	if len(s) == 0 {
+		return 0
+	}
 	mn := s[0]
-	for _, v := range s { if v < mn { mn = v } }
+	for _, v := range s {
+		if v < mn {
+			mn = v
+		}
+	}
 	return mn
 }
 
 func SliceSum(s []float64) float64 {
 	sum := 0.0
-	for _, v := range s { sum += v }
+	for _, v := range s {
+		sum += v
+	}
 	return sum
 }
 
 func IntSliceToFloat(s []int) []float64 {
 	out := make([]float64, len(s))
-	for i, v := range s { out[i] = float64(v) }
+	for i, v := range s {
+		out[i] = float64(v)
+	}
 	return out
 }
