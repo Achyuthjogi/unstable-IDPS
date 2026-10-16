@@ -1,4 +1,4 @@
-# Nexus Enterprise IDPS: Cross-Platform Intrusion Detection & Prevention System
+# IDPS: Real-Time Intrusion Detection and Prevention System
 
 ![IDPS Dashboard Mockup](https://via.placeholder.com/1200x600.png?text=Nexus+Enterprise+IDPS+SOC+Dashboard)
 
