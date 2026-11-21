@@ -1,4 +1,4 @@
-# IDPS: Real-Time Intrusion Detection and Prevention System
+# Nexus Enterprise IDPS: Cross-Platform Intrusion Detection & Prevention System
 
 ![IDPS Dashboard Mockup](https://via.placeholder.com/1200x600.png?text=Nexus+Enterprise+IDPS+SOC+Dashboard)
 
@@ -33,10 +33,15 @@ The system provides a unified detection engine with platform-specific networking
 * **Fail-Safe Safety Allowlists**: Prevents accidental blocking of local interfaces, loopback (`127.0.0.1`), default gateway, DNS servers, and broadcast/multicast ranges.
 * **TTL Expiration & Rollback**: Automatic background sweeper that restores access when temporary block durations expire.
 
-### 4. Enterprise Reliability & Security
+### 4. Enterprise Observability, SIEM & Threat Intelligence
+* **Automated Threat Intelligence (TI)**: Dynamic ingestion of Feodo Tracker, ThreatFox, Emerging Threats, and Tor Exit Node IOCs into an in-memory sub-microsecond Radix/CIDR matching engine.
+* **Encrypted Traffic Analytics (ETA)**: JA3 and JA3S client/server TLS handshake fingerprinting detects Cobalt Strike, Metasploit, Emotet, TrickBot, and AsyncRAT C2 beacons without breaking TLS encryption.
+* **Active Session Disruption**: Injects bidirectional raw TCP RST packets to instantly tear down rogue sockets on both client and server endpoints.
+* **High-Availability (HA) State Replication**: Multi-node cluster mesh with HMAC-SHA256 authenticated peer discovery, real-time block replication, and heartbeat monitoring.
+* **SIEM / SOAR & Prometheus Export**: Native ArcSight/Splunk Common Event Format (CEF) and RFC 5424 Syslog streaming, automated SOAR webhook dispatch, and standard `/metrics` Prometheus exporter.
+* **Deep DNS Exfiltration Detection**: Shannon entropy mathematical analysis on DNS query subdomains detects `dnscat2`, `iodine`, and DGA exfiltration.
 * **Role-Based Access Control (RBAC)**: Enforces `admin`, `analyst`, and `viewer` hierarchy across all REST and WebSocket endpoints.
 * **Forensic Audit Logging**: Thread-safe, append-only JSONL audit trail (`audit.log`) logging all security policy changes.
-* **Live Telemetry & Metrics**: Real CPU, memory, uptime, goroutines, packets captured, packets inspected, packets dropped, packets missed, and active flows.
 
 ---
 
@@ -224,11 +229,10 @@ The system is configured via environment variables or a `.env` file in `backend/
 | `LAN_INTERFACE` | *Auto-detected* | Monitored or local client interface |
 | `FIREWALL_DRY_RUN` | `false` | When `true`, logs simulated firewall commands without executing them |
 | `BLOCK_TTL_SECONDS` | `600` | Duration (seconds) before temporary IP blocks expire (default 10 min) |
-| `SYN_FLOOD_THRESHOLD` | `150` | Maximum TCP SYN packets per 3-second window before triggering block |
-| `PORT_SCAN_THRESHOLD` | `20` | Unique destination ports accessed per 3-second window |
-| `SUSPICIOUS_RATE_THRESHOLD`| `5000` | General packet rate anomaly threshold |
 | `ML_SERVICE_URL` | `http://localhost:5001`| URL of Python FastAPI Isolation Forest service |
 | `ML_ENABLED` | `true` | When `true`, evaluates incoming flows against Isolation Forest model |
+
+Heuristic detection thresholds use built-in defaults and are not configurable through the dashboard, API, or environment variables.
 
 ---
 

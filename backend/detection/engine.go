@@ -14,6 +14,7 @@ import (
 	"idps-backend/inspect"
 	"idps-backend/rules"
 	"idps-backend/state"
+	"idps-backend/threatintel"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -26,6 +27,9 @@ type Engine struct {
 	HTTPInspect *inspect.HTTPInspector
 	DNSInspect  *inspect.DNSInspector
 	SSHInspect  *inspect.SSHInspector
+	TLSInspect  *inspect.TLSInspector
+	ThreatIntel *threatintel.Manager
+	Disrupter   *firewall.SessionDisrupter
 	MLClient    *MLClient
 
 	State       *state.AppState
@@ -34,7 +38,7 @@ type Engine struct {
 	AlertLogger *alert.Logger
 }
 
-// NewEngine initializes the detection engine.
+// NewEngine initializes the enterprise detection engine.
 func NewEngine(st *state.AppState, cfg *config.Config, fm *firewall.FirewallManager, re *rules.Engine, alertLogger *alert.Logger, mlClient *MLClient) *Engine {
 	return &Engine{
 		Tracker:     flow.NewTracker(100000, 120*time.Second, 65535),
@@ -42,11 +46,21 @@ func NewEngine(st *state.AppState, cfg *config.Config, fm *firewall.FirewallMana
 		HTTPInspect: &inspect.HTTPInspector{},
 		DNSInspect:  &inspect.DNSInspector{},
 		SSHInspect:  &inspect.SSHInspector{},
+		TLSInspect:  inspect.NewTLSInspector(),
+		ThreatIntel: threatintel.NewManager(),
+		Disrupter:   firewall.NewSessionDisrupter(),
 		MLClient:    mlClient,
 		State:       st,
 		Config:      cfg,
 		Firewall:    fm,
 		AlertLogger: alertLogger,
+	}
+}
+
+// SetThreatIntel sets a shared Threat Intelligence manager.
+func (e *Engine) SetThreatIntel(ti *threatintel.Manager) {
+	if ti != nil {
+		e.ThreatIntel = ti
 	}
 }
 
@@ -114,6 +128,17 @@ func (e *Engine) ProcessPacket(packet PacketInfo) bool {
 	isClientToServer := f.OriginalSrcIP == pktSrc && f.OriginalSrcPort == packet.SrcPort
 	shouldDrop := false
 
+	// 2.5 Threat Intelligence IP Matching (Sub-microsecond exact IP + CIDR lookup)
+	if e.ThreatIntel != nil {
+		if ind, matched := e.ThreatIntel.CheckIP(packet.SrcIP); matched {
+			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, fmt.Sprintf("Threat Intel Inbound Match: %s", ind.Description), string(ind.Type), 1, "TI-SRC-IP", packet.SrcMAC)
+			shouldDrop = true
+		} else if ind, matched := e.ThreatIntel.CheckIP(packet.DstIP); matched {
+			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, fmt.Sprintf("Threat Intel Outbound Match: %s", ind.Description), string(ind.Type), 1, "TI-DST-IP", packet.SrcMAC)
+			shouldDrop = true
+		}
+	}
+
 	// 3. Protocol Inspection for Anomalies
 	if httpPorts[packet.DstPort] || httpPorts[packet.SrcPort] {
 		_, _, isAnomaly := e.HTTPInspect.InspectRequest(packet.Payload)
@@ -124,8 +149,37 @@ func (e *Engine) ProcessPacket(packet PacketInfo) bool {
 	} else if packet.DstPort == 22 || packet.SrcPort == 22 {
 		if e.SSHInspect.Inspect(packet.Payload) {
 			e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "Deprecated SSH Version Detected", "policy-violation", 3, "NET-SSH-POLICY", packet.SrcMAC)
-			// policy violation, maybe not drop immediately, but let's drop for completeness
 			shouldDrop = true
+		}
+	} else if packet.DstPort == 443 || packet.SrcPort == 443 || (len(packet.Payload) > 5 && packet.Payload[0] == 0x16) {
+		// Encrypted Traffic Analytics (ETA) & JA3 Fingerprinting
+		if e.TLSInspect != nil {
+			fp := e.TLSInspect.InspectDetailed(packet.Payload)
+			if fp != nil {
+				// Threat Intel on SNI Domain
+				if fp.SNI != "" && e.ThreatIntel != nil {
+					if domInd, found := e.ThreatIntel.CheckDomain(fp.SNI); found {
+						e.triggerRuleAlert(packet.SrcIP, packet.DstIP, fmt.Sprintf("Malicious TLS C2 Domain: %s (%s)", fp.SNI, domInd.Description), "c2-domain-match", 1, "TI-TLS-SNI", packet.SrcMAC)
+						shouldDrop = true
+					}
+				}
+				// Malicious JA3 Fingerprint Match (Cobalt Strike, Emotet, Metasploit, etc.)
+				if fp.IsMaliciousJA3 {
+					sev := 2
+					if fp.ThreatSeverity == "Critical" {
+						sev = 1
+					}
+					e.triggerRuleAlert(packet.SrcIP, packet.DstIP, fmt.Sprintf("Malicious TLS JA3 Fingerprint: %s (MD5: %s)", fp.MalwareFamily, fp.JA3Hash), "c2-tls-ja3", sev, "JA3-C2-MALWARE", packet.SrcMAC)
+					shouldDrop = true
+				}
+				// Cryptographic Policy Violations
+				if fp.IsWeakCipher {
+					e.triggerRuleAlert(packet.SrcIP, packet.DstIP, fmt.Sprintf("Weak TLS Cipher Negotiated: %s", fp.WeakCipherDesc), "policy-violation", 3, "TLS-WEAK-CIPHER", packet.SrcMAC)
+				}
+				if fp.IsDeprecatedVer {
+					e.triggerRuleAlert(packet.SrcIP, packet.DstIP, fmt.Sprintf("Deprecated TLS Version Negotiated: %s", fp.VersionStr), "policy-violation", 3, "TLS-DEPRECATED-VER", packet.SrcMAC)
+				}
+			}
 		}
 	} else if (packet.DstPort == 53 || packet.SrcPort == 53) && packet.Protocol == "UDP" {
 		func() {
@@ -136,9 +190,20 @@ func (e *Engine) ProcessPacket(packet PacketInfo) bool {
 			}()
 			dnsLayer := &layers.DNS{}
 			if err := dnsLayer.DecodeFromBytes(packet.Payload, gopacket.NilDecodeFeedback); err == nil {
-				if e.DNSInspect.Inspect(dnsLayer, true) {
-					e.triggerRuleAlert(packet.SrcIP, packet.DstIP, "DNS Protocol Anomaly Detected", "protocol-command-decode", 3, "NET-DNS-ANOMALY", packet.SrcMAC)
+				anomaly := e.DNSInspect.InspectWithDetails(dnsLayer, true)
+				if anomaly.IsAnomaly {
+					sev := 3
+					if anomaly.ThreatType == "DNS_DATA_EXFILTRATION" || anomaly.ThreatType == "DNS_REBINDING" {
+						sev = 1
+					}
+					e.triggerRuleAlert(packet.SrcIP, packet.DstIP, fmt.Sprintf("DNS Protocol Threat: %s (%s)", anomaly.Description, anomaly.QueryName), "protocol-command-decode", sev, "NET-DNS-"+anomaly.ThreatType, packet.SrcMAC)
 					shouldDrop = true
+				}
+				if anomaly.QueryName != "" && e.ThreatIntel != nil {
+					if domInd, found := e.ThreatIntel.CheckDomain(anomaly.QueryName); found {
+						e.triggerRuleAlert(packet.SrcIP, packet.DstIP, fmt.Sprintf("DNS Malicious C2 Domain: %s (%s)", anomaly.QueryName, domInd.Description), "c2-domain-match", 1, "TI-DNS-DOMAIN", packet.SrcMAC)
+						shouldDrop = true
+					}
 				}
 			}
 		}()
@@ -289,6 +354,10 @@ func (e *Engine) ProcessPacket(packet PacketInfo) bool {
 				}
 			}()
 		}
+	}
+
+	if shouldDrop && packet.Protocol == "TCP" && e.Disrupter != nil {
+		_ = e.Disrupter.TerminateFlow(packet.SrcIP, packet.DstIP, packet.SrcPort, packet.DstPort, "TCP", packet.Seq, packet.Seq+uint32(len(packet.Payload)))
 	}
 
 	return !shouldDrop

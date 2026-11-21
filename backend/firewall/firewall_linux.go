@@ -41,6 +41,17 @@ func runCmd(cfg *config.Config, name string, args ...string) error {
 			return nil
 		}
 	}
+
+	if name == "sudo" {
+		if os.Geteuid() == 0 && len(args) > 0 {
+			name = args[0]
+			args = args[1:]
+		} else {
+			// Non-root: ensure sudo is non-interactive so it never prompts on stdin
+			args = append([]string{"-n"}, args...)
+		}
+	}
+
 	cmd := exec.Command(name, args...)
 	return cmd.Run()
 }
@@ -65,7 +76,12 @@ func (f *linuxFirewall) ruleExists(cfg *config.Config, bin string, args ...strin
 		checkArgs = append([]string{"-C"}, args...)
 	}
 
-	cmd := exec.Command("sudo", append([]string{bin}, checkArgs...)...)
+	var cmd *exec.Cmd
+	if os.Geteuid() == 0 {
+		cmd = exec.Command(bin, checkArgs...)
+	} else {
+		cmd = exec.Command("sudo", append([]string{"-n", bin}, checkArgs...)...)
+	}
 	return cmd.Run() == nil
 }
 
@@ -137,6 +153,7 @@ func (f *linuxFirewall) RemoveBlock(ip, mac string, cfg *config.Config) error {
 func (f *linuxFirewall) SetupGateway(cfg *config.Config) error {
 	cfg.Mu.RLock()
 	mode := cfg.IDPSDeploymentMode
+	secMode := cfg.IDPSSecurityMode
 	wan := cfg.WanInterface
 	lan := cfg.LanInterface
 	dryRun := cfg.FirewallDryRun
@@ -144,7 +161,7 @@ func (f *linuxFirewall) SetupGateway(cfg *config.Config) error {
 	cfg.Mu.RUnlock()
 
 	if mode == "HOST" {
-		if capIface != "" {
+		if secMode == "IPS" && capIface != "" {
 			_ = runCmd(cfg, "sudo", "iptables", "-I", "INPUT", "1", "-i", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-IN")
 			_ = runCmd(cfg, "sudo", "iptables", "-I", "OUTPUT", "1", "-o", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-OUT")
 		}
@@ -182,6 +199,7 @@ func (f *linuxFirewall) SetupGateway(cfg *config.Config) error {
 func (f *linuxFirewall) TeardownGateway(cfg *config.Config) error {
 	cfg.Mu.RLock()
 	mode := cfg.IDPSDeploymentMode
+	secMode := cfg.IDPSSecurityMode
 	wan := cfg.WanInterface
 	lan := cfg.LanInterface
 	dryRun := cfg.FirewallDryRun
@@ -189,7 +207,7 @@ func (f *linuxFirewall) TeardownGateway(cfg *config.Config) error {
 	cfg.Mu.RUnlock()
 
 	if mode == "HOST" {
-		if capIface != "" {
+		if secMode == "IPS" && capIface != "" {
 			_ = runCmd(cfg, "sudo", "iptables", "-D", "INPUT", "-i", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-IN")
 			_ = runCmd(cfg, "sudo", "iptables", "-D", "OUTPUT", "-o", capIface, "-j", "NFQUEUE", "--queue-num", "0", "-m", "comment", "--comment", "IDPS-NFQ-HOST-OUT")
 		}

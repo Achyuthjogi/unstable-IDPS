@@ -1,85 +1,131 @@
 @import "tailwindcss";
 
+/* ─── Light theme (default) ─── */
 @theme {
-  --color-background: #050505;
-  --color-foreground: #ffffff;
+  --color-background: #ffffff;
+  --color-foreground: #111113;
 
-  --color-card: rgba(10, 10, 10, 0.4);
-  --color-card-foreground: #ffffff;
+  --color-card: #ffffff;
+  --color-card-foreground: #111113;
 
-  --color-popover: rgba(10, 10, 10, 0.6);
-  --color-popover-foreground: #ffffff;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #111113;
 
-  --color-primary: #00ffcc;
-  --color-primary-foreground: #000000;
+  --color-primary: #2563eb;
+  --color-primary-foreground: #ffffff;
 
-  --color-secondary: rgba(255, 255, 255, 0.05);
-  --color-secondary-foreground: #ffffff;
+  --color-secondary: #f4f4f5;
+  --color-secondary-foreground: #18181b;
 
-  --color-muted: rgba(255, 255, 255, 0.1);
-  --color-muted-foreground: rgba(255, 255, 255, 0.5);
+  --color-muted: #f4f4f5;
+  --color-muted-foreground: #71717a;
 
-  --color-border: rgba(255, 255, 255, 0.1);
-  --color-input: rgba(255, 255, 255, 0.05);
-  --color-ring: #00ffcc;
+  --color-accent: #f4f4f5;
+  --color-accent-foreground: #18181b;
 
-  --radius: 0px; /* Minimalist sharp edges */
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+
+  --color-border: #e4e4e7;
+  --color-input: #e4e4e7;
+  --color-ring: #2563eb;
+
+  --radius: 8px;
+
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+/* ─── Dark theme ─── */
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-background: #111113;
+    --color-foreground: #ededef;
+
+    --color-card: #1a1a1d;
+    --color-card-foreground: #ededef;
+
+    --color-popover: #1a1a1d;
+    --color-popover-foreground: #ededef;
+
+    --color-primary: #3b82f6;
+    --color-primary-foreground: #ffffff;
+
+    --color-secondary: #27272a;
+    --color-secondary-foreground: #e4e4e7;
+
+    --color-muted: #27272a;
+    --color-muted-foreground: #a1a1aa;
+
+    --color-accent: #27272a;
+    --color-accent-foreground: #e4e4e7;
+
+    --color-destructive: #ef4444;
+    --color-destructive-foreground: #ffffff;
+
+    --color-success: #22c55e;
+    --color-warning: #f59e0b;
+
+    --color-border: #2e2e32;
+    --color-input: #2e2e32;
+    --color-ring: #3b82f6;
+  }
 }
 
 @layer base {
   * {
     border-color: var(--color-border);
   }
+
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
-    font-family: 'Inter', system-ui, sans-serif;
+    font-family: var(--font-sans);
     margin: 0;
     overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 }
 
-/* Scrollbar */
+/* ─── Scrollbar ─── */
 ::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--color-muted-foreground);
+  border-radius: 3px;
+  opacity: 0.4;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #00ffcc;
+  background: var(--color-foreground);
+  opacity: 0.6;
 }
 
 @layer utilities {
-  /*
-   * PERFORMANCE FIX: Removed backdrop-filter: blur(12px) from kinetic-card.
-   *
-   * backdrop-filter creates a separate compositing layer for *every* element
-   * that uses it. With 30-50+ kinetic-cards on the dashboard, the GPU was
-   * compositing dozens of blur passes every frame — extremely expensive on
-   * integrated GPUs (Intel/AMD iGPU).
-   *
-   * Replaced with a simple semi-transparent background that achieves a similar
-   * frosted-glass aesthetic without the compositing cost.
-   */
-  .kinetic-card {
-    background: linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.015) 100%);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    transition: border-color 0.3s ease, box-shadow 0.3s ease;
-  }
-  
-  .kinetic-card:hover {
-    border-color: rgba(0, 255, 204, 0.25);
-    box-shadow: 0 0 15px rgba(0, 255, 204, 0.08);
-    /* Removed transform: translateY(-2px) — causes layout reflow on hover
-       for every card, which is janky when hovering across many cards quickly */
+  /* Clean card — no gradients, no glow */
+  .card {
+    background-color: var(--color-card);
+    color: var(--color-card-foreground);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
   }
 
-  .text-glow {
-    text-shadow: 0 0 10px rgba(0, 255, 204, 0.5);
+  .card:hover {
+    border-color: var(--color-muted-foreground);
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.06);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .card:hover {
+      box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.3);
+    }
   }
 }

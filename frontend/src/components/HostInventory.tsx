@@ -1,4 +1,5 @@
-import { Server, Shield, Cpu, HardDrive, Clock, CheckCircle2, AlertTriangle, Network, Laptop, RefreshCw } from 'lucide-react';
+import { Server, Shield, Cpu, HardDrive, Clock, CheckCircle2, Laptop } from 'lucide-react';
+import { safeFormatDateTime, safeToFixed, safeLocaleString } from '../utils/format';
 
 interface HostInventoryProps {
   data: any;
@@ -7,9 +8,8 @@ interface HostInventoryProps {
 export default function HostInventory({ data }: HostInventoryProps) {
   if (!data) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-4 text-muted-foreground">
-        <div className="w-10 h-10 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-        <p className="text-sm">Loading host sensor telemetry...</p>
+      <div className="flex items-center justify-center h-64 text-sm text-muted-foreground">
+        Loading host telemetry...
       </div>
     );
   }
@@ -17,7 +17,7 @@ export default function HostInventory({ data }: HostInventoryProps) {
   const platform = data.platform || {
     os: 'linux',
     arch: 'amd64',
-    hostname: 'unknown',
+    hostname: 'Security-Sensor',
     is_elevated: false,
     capture_driver: 'AF_PACKET',
     firewall_backend: 'iptables',
@@ -34,235 +34,207 @@ export default function HostInventory({ data }: HostInventoryProps) {
     goroutine_count: 0,
   };
 
-  const devices = data.devices || [];
+  const devices = Array.isArray(data.devices) ? data.devices : [];
 
   const formatBytes = (bytes: number) => {
-    if (!bytes || bytes === 0) return '0 MB';
+    if (!bytes || bytes <= 0) return '0 MB';
     const mb = bytes / (1024 * 1024);
     if (mb < 1024) return `${mb.toFixed(1)} MB`;
     return `${(mb / 1024).toFixed(2)} GB`;
   };
 
   const formatUptime = (seconds: number) => {
-    if (!seconds || seconds === 0) return 'Just started';
+    if (!seconds || seconds <= 0) return 'Just started';
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
+    const s = Math.floor(seconds % 60);
     if (h > 0) return `${h}h ${m}m ${s}s`;
     if (m > 0) return `${m}m ${s}s`;
     return `${s}s`;
   };
 
-  const isWindows = platform.os.toLowerCase() === 'windows';
-
   return (
-    <div className="space-y-6 max-w-6xl mx-auto pb-12">
+    <div className="max-w-5xl mx-auto space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between mb-8">
-        <div className="flex items-center gap-3">
-          <Server className="w-8 h-8 text-primary" />
-          <div>
-            <h2 className="text-3xl font-bold tracking-tight">Host & Sensor Inventory</h2>
-            <p className="text-sm text-muted-foreground">Cross-platform sensor capabilities, system health, and monitored network inventory</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold kinetic-card border-primary/30 text-primary">
-            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-            Sensor Telemetry Live
-          </span>
-        </div>
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight">Host & Sensor Inventory</h1>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          Host environment details, capture drivers, and cataloged network endpoints.
+        </p>
       </div>
 
-      {/* Sensor Host Identity Card */}
-      <div className="kinetic-card rounded-2xl p-6 border border-border/40">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-border/20">
-          <div className="flex items-start gap-4">
-            <div className={`p-4 rounded-2xl kinetic-card text-2xl ${isWindows ? 'text-sky-400' : 'text-amber-400'}`}>
-              {isWindows ? '🪟' : '🐧'}
+      {/* Host Summary Card */}
+      <div className="card p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-border">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-md bg-secondary text-foreground flex items-center justify-center font-bold text-sm">
+              <Server className="w-5 h-5 text-primary" />
             </div>
             <div>
-              <div className="flex items-center gap-3">
-                <h3 className="text-xl font-bold font-mono">{platform.hostname || 'Security-Sensor'}</h3>
-                <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider ${
-                  isWindows 
-                    ? 'bg-sky-500/10 text-sky-400 border border-sky-500/30' 
-                    : 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-                }`}>
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-sm">{platform.hostname || 'Security-Sensor'}</span>
+                <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-secondary text-muted-foreground uppercase">
                   {platform.os} / {platform.arch}
                 </span>
-                <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider flex items-center gap-1 ${
-                  platform.is_elevated 
-                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' 
-                    : 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
-                }`}>
+                <span className="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground flex items-center gap-1">
                   <Shield className="w-3 h-3" />
-                  {platform.is_elevated ? (isWindows ? 'Admin Privileged' : 'Root Privileged') : 'Unprivileged'}
+                  {platform.is_elevated ? 'Privileged' : 'Standard'}
                 </span>
               </div>
-              <p className="text-xs text-muted-foreground mt-1">
-                Active sensor operating in {data.system?.gateway_ip ? 'GATEWAY (Inline IPS)' : 'HOST (Local Security)'} mode.
-              </p>
+              <span className="text-xs text-muted-foreground mt-0.5 block">
+                Operating in {data.system?.gateway_ip ? 'Gateway Mode' : 'Host Mode'}.
+              </span>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="px-3.5 py-2 rounded-xl kinetic-card text-left">
-              <span className="text-[10px] text-muted-foreground uppercase font-semibold block">Capture Driver</span>
-              <span className="font-mono text-xs font-bold text-primary">{platform.capture_driver || 'AF_PACKET'}</span>
+          <div className="flex items-center gap-2 text-xs font-mono">
+            <div className="px-3 py-1 rounded bg-secondary/50 border border-border/50">
+              <span className="text-muted-foreground block text-[10px]">Driver</span>
+              <span className="text-foreground font-semibold">{platform.capture_driver || 'AF_PACKET'}</span>
             </div>
-            <div className="px-3.5 py-2 rounded-xl kinetic-card text-left">
-              <span className="text-[10px] text-muted-foreground uppercase font-semibold block">Firewall Enforcement</span>
-              <span className="font-mono text-xs font-bold text-primary">{platform.firewall_backend || 'iptables'}</span>
+            <div className="px-3 py-1 rounded bg-secondary/50 border border-border/50">
+              <span className="text-muted-foreground block text-[10px]">Firewall</span>
+              <span className="text-foreground font-semibold">{platform.firewall_backend || 'iptables'}</span>
             </div>
-            <div className="px-3.5 py-2 rounded-xl kinetic-card text-left">
-              <span className="text-[10px] text-muted-foreground uppercase font-semibold block">Inline IPS Engine</span>
-              <span className={`font-mono text-xs font-bold ${platform.has_inline_engine ? 'text-emerald-400' : 'text-amber-400'}`}>
-                {platform.has_inline_engine ? 'Supported' : 'Passive Only'}
+            <div className="px-3 py-1 rounded bg-secondary/50 border border-border/50">
+              <span className="text-muted-foreground block text-[10px]">Inline Engine</span>
+              <span className={platform.has_inline_engine ? 'text-success font-semibold' : 'text-muted-foreground'}>
+                {platform.has_inline_engine ? 'Active' : 'Passive'}
               </span>
             </div>
           </div>
         </div>
 
-        {/* Sensor Capabilities */}
-        <div className="pt-4">
-          <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider block mb-2">
-            Active Platform Capabilities
-          </span>
-          <div className="flex flex-wrap gap-2">
+        {/* Platform Capabilities */}
+        <div>
+          <span className="text-xs font-medium text-muted-foreground block mb-2">Driver Capabilities</span>
+          <div className="flex flex-wrap gap-1.5">
             {platform.capabilities && platform.capabilities.length > 0 ? (
               platform.capabilities.map((cap: string) => (
                 <span
                   key={cap}
-                  className="px-2.5 py-1 rounded-lg text-xs font-mono font-medium kinetic-card text-foreground/80 border border-border/30 flex items-center gap-1.5"
+                  className="px-2 py-0.5 rounded bg-secondary text-foreground text-xs font-mono flex items-center gap-1 border border-border/50"
                 >
-                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                  <CheckCircle2 className="w-3 h-3 text-success" />
                   {cap}
                 </span>
               ))
             ) : (
-              <span className="text-xs text-muted-foreground italic">Standard capture capabilities active</span>
+              <span className="text-xs text-muted-foreground">Standard packet capture enabled.</span>
             )}
           </div>
         </div>
       </div>
 
-      {/* Live Hardware Telemetry Row */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Hardware Telemetry Counters */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {/* CPU */}
-        <div className="kinetic-card rounded-2xl p-5">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
-              <Cpu className="w-4 h-4 text-primary" /> CPU Utilization
+        <div className="card p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-muted-foreground flex items-center gap-1.5 font-medium">
+              <Cpu className="w-3.5 h-3.5 text-primary" /> CPU Usage
             </span>
-            <span className="font-mono text-xs font-bold text-primary">
-              {(telemetry.cpu_percent || 0).toFixed(1)}%
+            <span className="font-mono font-semibold text-foreground">
+              {safeToFixed(telemetry.cpu_percent || data.system?.cpu, 1)}%
             </span>
           </div>
-          <div className="w-full bg-border/30 rounded-full h-2 overflow-hidden mb-2">
+          <div className="w-full bg-secondary rounded-full h-1.5 overflow-hidden">
             <div
-              className="bg-primary h-2 rounded-full transition-all duration-500"
-              style={{ width: `${Math.min(100, Math.max(0, telemetry.cpu_percent || 0))}%` }}
+              className="bg-primary h-1.5 rounded-full transition-all duration-300"
+              style={{ width: `${Math.min(100, Math.max(0, Number(telemetry.cpu_percent) || 0))}%` }}
             />
           </div>
-          <span className="text-[11px] text-muted-foreground">Dynamic load across engine workers</span>
+          <span className="text-[11px] text-muted-foreground block">Daemon processing load</span>
         </div>
 
         {/* Memory */}
-        <div className="kinetic-card rounded-2xl p-5">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
-              <HardDrive className="w-4 h-4 text-emerald-400" /> Sensor Memory
+        <div className="card p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-muted-foreground flex items-center gap-1.5 font-medium">
+              <HardDrive className="w-3.5 h-3.5 text-success" /> Memory
             </span>
-            <span className="font-mono text-xs font-bold text-emerald-400">
-              {(telemetry.memory_percent || 0).toFixed(1)}%
+            <span className="font-mono font-semibold text-foreground">
+              {safeToFixed(telemetry.memory_percent || data.system?.memory, 1)}%
             </span>
           </div>
-          <div className="w-full bg-border/30 rounded-full h-2 overflow-hidden mb-2">
+          <div className="w-full bg-secondary rounded-full h-1.5 overflow-hidden">
             <div
-              className="bg-emerald-500 h-2 rounded-full transition-all duration-500"
-              style={{ width: `${Math.min(100, Math.max(0, telemetry.memory_percent || 0))}%` }}
+              className="bg-success h-1.5 rounded-full transition-all duration-300"
+              style={{ width: `${Math.min(100, Math.max(0, Number(telemetry.memory_percent) || 0))}%` }}
             />
           </div>
-          <span className="text-[11px] text-muted-foreground font-mono">
+          <span className="text-[11px] text-muted-foreground font-mono block">
             {formatBytes(telemetry.memory_used_bytes)} / {formatBytes(telemetry.memory_total_bytes)}
           </span>
         </div>
 
-        {/* Sensor Uptime */}
-        <div className="kinetic-card rounded-2xl p-5">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
-              <Clock className="w-4 h-4 text-amber-400" /> Sensor Uptime
-            </span>
-            <span className="font-mono text-xs font-bold text-amber-400">
-              Active
-            </span>
-          </div>
-          <div className="text-2xl font-bold tracking-tight text-foreground font-mono mb-1">
+        {/* Uptime */}
+        <div className="card p-4 space-y-1">
+          <span className="text-xs text-muted-foreground flex items-center gap-1.5 font-medium">
+            <Clock className="w-3.5 h-3.5 text-warning" /> Sensor Uptime
+          </span>
+          <div className="text-lg font-bold font-mono tracking-tight text-foreground pt-1">
             {formatUptime(telemetry.uptime_seconds)}
           </div>
-          <span className="text-[11px] text-muted-foreground">Continuous zero-loss monitoring</span>
+          <span className="text-[11px] text-muted-foreground block">Continuous packet tracking</span>
         </div>
 
-        {/* Concurrency / Goroutines */}
-        <div className="kinetic-card rounded-2xl p-5">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
-              <RefreshCw className="w-4 h-4 text-purple-400" /> Engine Concurrency
-            </span>
-            <span className="font-mono text-xs font-bold text-purple-400">
-              Go Runtime
-            </span>
+        {/* Goroutines */}
+        <div className="card p-4 space-y-1">
+          <span className="text-xs text-muted-foreground flex items-center gap-1.5 font-medium">
+            <Server className="w-3.5 h-3.5 text-primary" /> Active Goroutines
+          </span>
+          <div className="text-lg font-bold font-mono tracking-tight text-foreground pt-1">
+            {safeLocaleString(telemetry.goroutine_count || 12)}
           </div>
-          <div className="text-2xl font-bold tracking-tight text-foreground font-mono mb-1">
-            {telemetry.goroutine_count || 12} <span className="text-xs font-normal text-muted-foreground">threads</span>
-          </div>
-          <span className="text-[11px] text-muted-foreground">Worker pool & packet dispatchers</span>
+          <span className="text-[11px] text-muted-foreground block">Worker pool threads</span>
         </div>
       </div>
 
-      {/* Monitored Host & Network Device Inventory */}
-      <div className="kinetic-card rounded-2xl p-6">
-        <div className="flex items-center justify-between mb-4">
+      {/* Discovered Hosts Table */}
+      <div className="card overflow-hidden">
+        <div className="px-4 py-3 border-b border-border bg-muted/30 flex items-center justify-between text-xs font-medium">
           <div className="flex items-center gap-2">
-            <Laptop className="w-5 h-5 text-primary" />
-            <h3 className="text-lg font-semibold">Monitored Network Endpoints</h3>
+            <Laptop className="w-4 h-4 text-primary" />
+            <span className="text-foreground">Network Endpoints ({devices.length})</span>
           </div>
-          <span className="text-xs font-mono text-muted-foreground">
-            {devices.length} endpoints discovered
-          </span>
+          <span className="text-muted-foreground">Automatic ARP & Flow discovery</span>
         </div>
 
         {devices.length === 0 ? (
-          <div className="text-center py-12 text-muted-foreground text-sm">
-            No connected network devices recorded yet. Packets traversing monitored interfaces will be automatically cataloged.
+          <div className="py-16 text-center text-xs text-muted-foreground">
+            No connected network devices cataloged yet.
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs">
+            <table className="w-full text-left text-xs border-collapse">
               <thead>
-                <tr className="border-b border-border/30 text-muted-foreground uppercase tracking-wider">
-                  <th className="py-3 px-4 font-semibold">IP Address</th>
-                  <th className="py-3 px-4 font-semibold">MAC Address</th>
-                  <th className="py-3 px-4 font-semibold">Identified Vendor / Name</th>
-                  <th className="py-3 px-4 font-semibold">First Seen</th>
-                  <th className="py-3 px-4 font-semibold">Last Activity</th>
-                  <th className="py-3 px-4 font-semibold text-right">Status</th>
+                <tr className="border-b border-border text-muted-foreground bg-muted/15 font-medium">
+                  <th className="py-2.5 px-4">IP Address</th>
+                  <th className="py-2.5 px-4">MAC Address</th>
+                  <th className="py-2.5 px-4">Vendor / Name</th>
+                  <th className="py-2.5 px-4">First Seen</th>
+                  <th className="py-2.5 px-4">Last Activity</th>
+                  <th className="py-2.5 px-4 text-right">Status</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border/20 font-mono">
+              <tbody className="divide-y divide-border/60 font-mono">
                 {devices.map((device: any, idx: number) => (
-                  <tr key={device.ip || idx} className="hover:bg-white/5 transition-colors">
-                    <td className="py-3 px-4 font-bold text-primary">{device.ip}</td>
-                    <td className="py-3 px-4 text-muted-foreground">{device.mac || 'N/A'}</td>
-                    <td className="py-3 px-4 text-foreground">{device.vendor || device.name || 'Network Host'}</td>
-                    <td className="py-3 px-4 text-muted-foreground">{device.first_seen || 'N/A'}</td>
-                    <td className="py-3 px-4 text-muted-foreground">{device.last_seen || 'Active'}</td>
-                    <td className="py-3 px-4 text-right">
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                        Monitored
+                  <tr key={device.ip || idx} className="hover:bg-muted/15 transition-colors">
+                    <td className="py-2.5 px-4 font-semibold text-foreground">{device.ip}</td>
+                    <td className="py-2.5 px-4 text-muted-foreground">{device.mac || 'N/A'}</td>
+                    <td className="py-2.5 px-4 font-sans text-foreground">
+                      {device.vendor || device.name || 'Network Host'}
+                    </td>
+                    <td className="py-2.5 px-4 text-muted-foreground">
+                      {safeFormatDateTime(device.first_seen, 'Initial')}
+                    </td>
+                    <td className="py-2.5 px-4 text-muted-foreground">
+                      {safeFormatDateTime(device.last_seen, 'Now')}
+                    </td>
+                    <td className="py-2.5 px-4 text-right font-sans">
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] font-medium bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+                        Active
                       </span>
                     </td>
                   </tr>
@@ -275,4 +247,3 @@ export default function HostInventory({ data }: HostInventoryProps) {
     </div>
   );
 }
-

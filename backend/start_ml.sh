@@ -36,17 +36,22 @@ if [ ! -f "$SCALER_PATH" ]; then
 fi
 
 # Create/activate virtual environment
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating Python virtual environment using Python 3.12..."
-    UV_BIN="$HOME/.local/bin/uv"
+VENV_PYTHON="$VENV_DIR/bin/python"
+if [ ! -d "$VENV_DIR" ] || [ ! -x "$VENV_PYTHON" ] || ! "$VENV_PYTHON" -c "exit(0)" >/dev/null 2>&1; then
+    echo "Configuring Python virtual environment..."
+    rm -rf "$VENV_DIR"
+    PYTHON_BIN=""
     if command -v python3.12 >/dev/null 2>&1; then
-        python3.12 -m venv "$VENV_DIR"
-    elif [ -x "$UV_BIN" ]; then
-        "$UV_BIN" venv --python 3.12 "$VENV_DIR"
-    elif command -v uv >/dev/null 2>&1; then
-        uv venv --python 3.12 "$VENV_DIR"
+        PYTHON_BIN="python3.12"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="python3"
+    fi
+
+    if [ -n "$PYTHON_BIN" ]; then
+        $PYTHON_BIN -m venv --system-site-packages "$VENV_DIR"
+        "$VENV_DIR/bin/python" -m ensurepip --default-pip >/dev/null 2>&1 || true
     else
-        echo "ERROR: Neither python3.12 nor uv was found."
+        echo "ERROR: python3 was not found in PATH."
         exit 1
     fi
 fi
@@ -55,9 +60,9 @@ echo "Activating virtual environment..."
 source "$VENV_DIR/bin/activate"
 
 # Install dependencies only if needed
-if ! python -c "import fastapi, uvicorn, pydantic" >/dev/null 2>&1; then
-    echo "Installing dependencies (this may take a few minutes)..."
-    pip install --default-timeout=1000 --quiet fastapi uvicorn joblib numpy pydantic scikit-learn pandas
+if ! python -c "import fastapi, uvicorn, pydantic, joblib" >/dev/null 2>&1; then
+    echo "Installing missing ML dependencies..."
+    pip install --default-timeout=1000 --quiet fastapi uvicorn joblib numpy pydantic scikit-learn pandas || true
 fi
 
 # Export model paths

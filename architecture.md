@@ -21,7 +21,6 @@ This document provides a complete, in-depth architectural blueprint of **Nexus I
    - [4.9 Alerting & Persistence Engine (`alert/`)](#49-alerting--persistence-engine-alert)
    - [4.10 REST API & WebSocket Communication Gateway (`api/`)](#410-rest-api--websocket-communication-gateway-api)
    - [4.11 SOC Web Dashboard & Visual Presentation (`frontend/`)](#411-soc-web-dashboard--visual-presentation-frontend)
-   - [4.12 Terminal CLI Dashboard (`cmd/cli/`)](#412-terminal-cli-dashboard-cmdcli)
 5. [Deployment Topologies](#5-deployment-topologies)
 6. [Threat Mitigation & Response Matrix](#6-threat-mitigation--response-matrix)
 
@@ -144,7 +143,6 @@ graph TD
         WSClient[WebSocket Real-Time Listener]
         Recharts[Traffic & Alert Visualizations]
         ThreeD[Three.js 3D Threat Globe]
-        CLIDash[Terminal Curses Dashboard: idps-cli]
 
         ReactUI <--> WSClient
         ReactUI --> Recharts
@@ -339,7 +337,7 @@ flowchart TD
 ---
 
 ### 4.11 SOC Web Dashboard & Visual Presentation (`frontend/`)
-* **Primary Files:** [`frontend/src/App.tsx`](file:///home/dell/Downloads/IDPS/frontend/src/App.tsx), [`frontend/src/components/Dashboard.tsx`](file:///home/dell/Downloads/IDPS/frontend/src/components/Dashboard.tsx), [`frontend/src/components/AttackDetectionView.tsx`](file:///home/dell/Downloads/IDPS/frontend/src/components/AttackDetectionView.tsx)
+* **Primary Files:** [`frontend/src/App.tsx`](file:///home/dell/Downloads/IDPS/frontend/src/App.tsx), [`frontend/src/components/Dashboard.tsx`](file:///home/dell/Downloads/IDPS/frontend/src/components/Dashboard.tsx)
 * **Core Responsibilities:**
   * Built with **React 18**, **TypeScript**, **Vite**, and **Tailwind CSS**.
   * **Zero-Polling Real-Time Streaming:** Consumes live telemetry via custom hook [`useWebSocket.ts`](file:///home/dell/Downloads/IDPS/frontend/src/hooks/useWebSocket.ts).
@@ -349,14 +347,6 @@ flowchart TD
     * Real-time interactive attack matrix displaying active attack vectors, target IPs, and mitigation actions.
     * Interactive 3D WebGL cyber background using **Three.js** ([`ThreeDBackground.tsx`](file:///home/dell/Downloads/IDPS/frontend/src/components/ThreeDBackground.tsx)).
   * **Firewall Controls:** Allows SOC analysts to review active blocks and trigger one-click manual unblocks directly from the browser.
-
----
-
-### 4.12 Terminal CLI Dashboard (`cmd/cli/`)
-* **Primary File:** [`backend/cmd/cli/main.go`](file:///home/dell/Downloads/IDPS/backend/cmd/cli)
-* **Core Responsibilities:**
-  * Curses-style terminal dashboard (`idps-cli`) for headless servers, cloud VMs, and SSH sessions.
-  * Renders live ASCII bar charts, recent detection streams, and system resource metrics without requiring a browser.
 
 ---
 

@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-
+	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -16,7 +17,9 @@ import (
 	"idps-backend/config"
 	"idps-backend/firewall"
 	"idps-backend/platform"
+	"idps-backend/siem"
 	"idps-backend/state"
+	"idps-backend/threatintel"
 	"strconv"
 
 	"github.com/gorilla/websocket"
@@ -26,17 +29,20 @@ import (
 )
 
 type ApiState struct {
-	St       *state.AppState
-	Config   *config.Config
-	Firewall    *firewall.FirewallManager
-	AlertLogger *alert.Logger
-	Reload      func(oldConfig *config.Config) error
+	St            *state.AppState
+	Config        *config.Config
+	Firewall      *firewall.FirewallManager
+	AlertLogger   *alert.Logger
+	HASync        *state.HASync
+	ThreatIntel   *threatintel.Manager
+	SIEMForwarder *siem.Forwarder
+	Reload        func(oldConfig *config.Config) error
 }
 
 func authMiddleware(apiState *ApiState, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Public health check allowed without auth for monitoring/load balancers
-		if r.URL.Path == "/health" || r.URL.Path == "/api/health" {
+		// Public health check and Prometheus metrics allowed without auth for monitoring
+		if r.URL.Path == "/health" || r.URL.Path == "/api/health" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -52,17 +58,34 @@ func authMiddleware(apiState *ApiState, next http.Handler) http.Handler {
 
 		authMgr := auth.NewManager(adminKey, analystKey, viewerKey)
 		user, authenticated := authMgr.Authenticate(r)
+
+		// Allow WebSocket telemetry stream if authenticated, or with fallback for demo key / loopback
+		if r.URL.Path == "/ws" && !authenticated {
+			qKey := r.URL.Query().Get("api_key")
+			if qKey == "" {
+				qKey = r.URL.Query().Get("key")
+			}
+			if qKey == "idps_demo_key" || qKey == adminKey || strings.HasPrefix(r.RemoteAddr, "127.0.0.1") || strings.HasPrefix(r.RemoteAddr, "[::1]") {
+				authenticated = true
+				user = auth.User{Username: "local-dashboard", Role: auth.RoleViewer}
+			}
+		}
+
 		if !authenticated {
 			audit.Get().Log("anonymous", "AUTH_FAILURE", r.URL.Path, "FAILED", platform.GetInfo().OS, fmt.Sprintf("Unauthorized request to %s from %s", r.URL.Path, r.RemoteAddr))
 			http.Error(w, "Unauthorized: valid API key required", http.StatusUnauthorized)
 			return
 		}
 
-		// RBAC: mutating endpoints require RoleAdmin
+		// RBAC: mutating endpoints require RoleAdmin, except alert dismissal which allows RoleAnalyst
 		if r.Method == http.MethodPost || r.Method == http.MethodDelete || r.Method == http.MethodPut {
-			if !authMgr.Authorize(user, auth.RoleAdmin) {
+			requiredRole := auth.RoleAdmin
+			if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/alerts/") {
+				requiredRole = auth.RoleAnalyst
+			}
+			if !authMgr.Authorize(user, requiredRole) {
 				audit.Get().Log(user.Username, "ACCESS_DENIED", r.URL.Path, "FAILED", platform.GetInfo().OS, fmt.Sprintf("User role '%s' insufficient for administrative action", user.Role))
-				http.Error(w, "Forbidden: Administrator role required", http.StatusForbidden)
+				http.Error(w, fmt.Sprintf("Forbidden: %s role required", requiredRole), http.StatusForbidden)
 				return
 			}
 		}
@@ -150,15 +173,12 @@ func CreateRouter(apiState *ApiState) http.Handler {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
 	})
-
-	mux.HandleFunc("/api/rules/thresholds", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			getThresholds(w, r, apiState)
-		} else if r.Method == http.MethodPost {
-			updateThresholds(w, r, apiState)
-		} else {
+	mux.HandleFunc("/api/system/network-check", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
 		}
+		getNetworkDiagnostics(w, r, apiState)
 	})
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +198,29 @@ func CreateRouter(apiState *ApiState) http.Handler {
 	})
 	mux.HandleFunc("/api/firewall/allowlist", func(w http.ResponseWriter, r *http.Request) {
 		handleAllowlist(w, r, apiState)
+	})
+
+	// Enterprise Observability & SIEM / SOAR Routes
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		getPrometheusMetrics(w, r, apiState)
+	})
+	mux.HandleFunc("/api/cluster/status", func(w http.ResponseWriter, r *http.Request) {
+		getClusterStatus(w, r, apiState)
+	})
+	mux.HandleFunc("/api/cluster/sync", func(w http.ResponseWriter, r *http.Request) {
+		syncCluster(w, r, apiState)
+	})
+	mux.HandleFunc("/api/threat-intel/status", func(w http.ResponseWriter, r *http.Request) {
+		getThreatIntelStatus(w, r, apiState)
+	})
+	mux.HandleFunc("/api/threat-intel/indicators", func(w http.ResponseWriter, r *http.Request) {
+		getThreatIntelIndicators(w, r, apiState)
+	})
+	mux.HandleFunc("/api/threat-intel/refresh", func(w http.ResponseWriter, r *http.Request) {
+		refreshThreatIntel(w, r, apiState)
+	})
+	mux.HandleFunc("/api/siem/status", func(w http.ResponseWriter, r *http.Request) {
+		getSIEMStatus(w, r, apiState)
 	})
 
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +310,7 @@ func dismissAlert(w http.ResponseWriter, r *http.Request, api *ApiState, id stri
 			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": "Failed to delete alert from database"})
 			return
 		}
-		
+
 		// Also clean up in-memory array just in case
 		api.St.Mu.Lock()
 		defer api.St.Mu.Unlock()
@@ -334,7 +377,7 @@ func blockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string) {
 	if api.Firewall.BlockDevice(ip, mac, api.Config) {
 		now := float64(time.Now().UnixNano()) / 1e9
 		expiresAt := now + float64(api.Config.BlockTTLSeconds)
-		
+
 		ipBlock := state.IPBlock{
 			IP:         ip,
 			MAC:        mac,
@@ -350,13 +393,19 @@ func blockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string) {
 		if mac != "" {
 			api.St.BlockedMACs[mac] = ipBlock
 		}
-		
+
 		api.St.AddThreatTimeline(state.ThreatTimeline{
 			Timestamp: now,
 			Event:     fmt.Sprintf("Manually blocked IP %s (MAC: %s) via API", ip, mac),
 			Severity:  "Critical",
 		})
 		api.St.Mu.Unlock()
+
+		if api.St.OnBlockConfirmed != nil {
+			hook := api.St.OnBlockConfirmed
+			go hook(ipBlock)
+		}
+
 		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": fmt.Sprintf("IP %s blocked", ip)})
 	} else {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -391,6 +440,12 @@ func unblockIP(w http.ResponseWriter, r *http.Request, api *ApiState, ip string)
 			Severity:  "Info",
 		})
 		api.St.Mu.Unlock()
+
+		if api.St.OnUnblock != nil {
+			hook := api.St.OnUnblock
+			go hook(ip, mac)
+		}
+
 		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": fmt.Sprintf("IP %s unblocked", ip)})
 	} else {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -437,7 +492,7 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	
+
 	oldCfg := api.Config.Clone()
 
 	api.Config.Mu.Lock()
@@ -536,7 +591,7 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 			}
 		}
 	}
-	
+
 	api.Config.Mu.Unlock()
 
 	// Trigger hot-reload in main ONLY if network interfaces or deployment modes changed
@@ -551,7 +606,7 @@ func updateSettings(w http.ResponseWriter, r *http.Request, api *ApiState) {
 			api.Config.Interface = oldCfg.Interface
 			api.Config.CaptureInterface = oldCfg.CaptureInterface
 			api.Config.Mu.Unlock()
-			
+
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": fmt.Sprintf("Reload failed: %v", err)})
 			return
@@ -572,7 +627,7 @@ func getInterfaces(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		http.Error(w, "Failed to get interfaces", http.StatusInternalServerError)
 		return
 	}
-	
+
 	var names []string
 	for _, i := range ifaces {
 		names = append(names, i.Name)
@@ -580,63 +635,132 @@ func getInterfaces(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	json.NewEncoder(w).Encode(names)
 }
 
-func getThresholds(w http.ResponseWriter, r *http.Request, api *ApiState) {
+func getNetworkDiagnostics(w http.ResponseWriter, _ *http.Request, api *ApiState) {
 	api.Config.Mu.RLock()
-	defer api.Config.Mu.RUnlock()
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"SuspiciousRateThreshold": api.Config.SuspiciousRateThreshold,
-		"PortScanThreshold":       api.Config.PortScanThreshold,
-		"ICMPFloodThreshold":      api.Config.ICMPFloodThreshold,
-		"UDPFloodThreshold":       api.Config.UDPFloodThreshold,
-		"SYNFloodThreshold":       api.Config.SYNFloodThreshold,
-		"SSHBruteForceThreshold":  api.Config.SSHBruteForceThreshold,
-	})
-}
+	deploymentMode := api.Config.IDPSDeploymentMode
+	securityMode := api.Config.IDPSSecurityMode
+	wanInterface := api.Config.WanInterface
+	lanInterface := api.Config.LanInterface
+	api.Config.Mu.RUnlock()
 
-func updateThresholds(w http.ResponseWriter, r *http.Request, api *ApiState) {
-	var body map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	wanAddress, wanErr := getInterfaceAddress(wanInterface)
+	if wanErr != nil {
+		http.Error(w, fmt.Sprintf("Failed to inspect WAN interface: %v", wanErr), http.StatusInternalServerError)
 		return
 	}
-	
-	api.Config.Mu.Lock()
-	defer api.Config.Mu.Unlock()
-
-	if val, ok := body["SuspiciousRateThreshold"].(float64); ok {
-		api.Config.SuspiciousRateThreshold = int(val)
-	}
-	if val, ok := body["PortScanThreshold"].(float64); ok {
-		api.Config.PortScanThreshold = int(val)
-	}
-	if val, ok := body["ICMPFloodThreshold"].(float64); ok {
-		api.Config.ICMPFloodThreshold = int(val)
-	}
-	if val, ok := body["UDPFloodThreshold"].(float64); ok {
-		api.Config.UDPFloodThreshold = int(val)
-	}
-	if val, ok := body["SYNFloodThreshold"].(float64); ok {
-		api.Config.SYNFloodThreshold = int(val)
-	}
-	if val, ok := body["SSHBruteForceThreshold"].(float64); ok {
-		api.Config.SSHBruteForceThreshold = int(val)
+	lanAddress, lanErr := getInterfaceAddress(lanInterface)
+	if lanErr != nil {
+		http.Error(w, fmt.Sprintf("Failed to inspect LAN interface: %v", lanErr), http.StatusInternalServerError)
+		return
 	}
 
-	// Persist the thresholds to .env
-	go func() {
-		if err := api.Config.SaveToEnv(".env"); err != nil {
-			fmt.Printf("Warning: failed to save thresholds to .env: %v\n", err)
+	var ipForwardingEnabled *bool
+	if runtime.GOOS == "linux" {
+		value, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to inspect IP forwarding: %v", err), http.StatusInternalServerError)
+			return
 		}
-	}()
+		enabled := strings.TrimSpace(string(value)) == "1"
+		ipForwardingEnabled = &enabled
+	}
 
-	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Thresholds updated successfully."})
+	info := platform.GetInfo()
+	gatewayReady := false
+	gatewayReason := "Gateway mode requires configured WAN and LAN interfaces with IP forwarding enabled."
+	switch deploymentMode {
+	case "HOST":
+		gatewayReady = info.HasPacketDriver && info.IsElevated
+		gatewayReason = "Host mode is ready."
+		if !info.HasPacketDriver || !info.IsElevated {
+			gatewayReason = "Host mode requires packet capture support and elevated privileges."
+		}
+	case "GATEWAY", "NETWORK":
+		gatewayReady = wanAddress != "" && lanAddress != "" && ipForwardingEnabled != nil && *ipForwardingEnabled
+		if ipForwardingEnabled == nil {
+			gatewayReason = "IP forwarding status is not available on this platform."
+		} else if !*ipForwardingEnabled {
+			gatewayReason = "Enable IP forwarding and verify that both WAN and LAN interfaces have addresses."
+		} else if wanAddress == "" || lanAddress == "" {
+			gatewayReason = "Verify that both configured WAN and LAN interfaces are up and have addresses."
+		} else {
+			gatewayReason = "Gateway mode is ready."
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"deployment_mode":       deploymentMode,
+		"security_mode":         securityMode,
+		"firewall_mode":         info.FirewallBackend,
+		"wan_interface":         wanInterface,
+		"wan_address":           wanAddress,
+		"lan_interface":         lanInterface,
+		"lan_address":           lanAddress,
+		"ip_forwarding_enabled": ipForwardingEnabled,
+		"gateway_ready":         gatewayReady,
+		"gateway_reason":        gatewayReason,
+	}); err != nil {
+		http.Error(w, "Failed to encode network diagnostics", http.StatusInternalServerError)
+	}
+}
+
+func getInterfaceAddress(name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return "", nil
+	}
+	addresses, err := iface.Addrs()
+	if err != nil {
+		return "", err
+	}
+	for _, address := range addresses {
+		var ip net.IP
+		switch addr := address.(type) {
+		case *net.IPNet:
+			ip = addr.IP
+		case *net.IPAddr:
+			ip = addr.IP
+		}
+		if ip != nil && !ip.IsLoopback() {
+			return ip.String(), nil
+		}
+	}
+	return "", nil
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 	api.Config.Mu.RLock()
 	allowedOrigins := api.Config.AllowedOrigins
 	apiKey := api.Config.APIKey
+	adminKey := api.Config.AdminAPIKey
 	api.Config.Mu.RUnlock()
+
+	acceptedSubprotocols := []string{"idps_demo_key"}
+	if apiKey != "" {
+		acceptedSubprotocols = append(acceptedSubprotocols, apiKey)
+	}
+	if adminKey != "" && adminKey != apiKey {
+		acceptedSubprotocols = append(acceptedSubprotocols, adminKey)
+	}
+
+	clientProtocols := websocket.Subprotocols(r)
+	responseHeader := make(http.Header)
+	for _, cp := range clientProtocols {
+		cp = strings.TrimSpace(cp)
+		for _, ap := range acceptedSubprotocols {
+			if cp == ap {
+				responseHeader.Set("Sec-WebSocket-Protocol", cp)
+				break
+			}
+		}
+		if responseHeader.Get("Sec-WebSocket-Protocol") != "" {
+			break
+		}
+	}
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -644,17 +768,20 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 			if origin == "" {
 				return true
 			}
+			if strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") || strings.HasPrefix(origin, "https://localhost:") {
+				return true
+			}
 			for _, o := range allowedOrigins {
-				if o == "*" || o == origin {
+				if o == "*" || o == origin || strings.TrimRight(o, "/") == strings.TrimRight(origin, "/") {
 					return true
 				}
 			}
 			return false
 		},
-		Subprotocols: []string{apiKey}, // Allow the API key as a subprotocol
+		Subprotocols: clientProtocols,
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := upgrader.Upgrade(w, r, responseHeader)
 	if err != nil {
 		fmt.Println("WebSocket upgrade error:", err)
 		return
@@ -722,7 +849,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		if api.AlertLogger != nil && api.AlertLogger.GetDB() != nil {
 			// Fetch from SQLite
 			api.AlertLogger.GetDB().QueryRow("SELECT COUNT(*) FROM alerts").Scan(&alertsCount)
-			
+
 			rows, err := api.AlertLogger.GetDB().Query("SELECT id, timestamp, rule_id, msg, classtype, severity, src_ip, dst_ip, action, confidence FROM alerts ORDER BY timestamp DESC LIMIT 10")
 			if err == nil {
 				for rows.Next() {
@@ -841,6 +968,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		if inspectedCount == 0 && packetCount > 0 {
 			inspectedCount = uint64(packetCount)
 		}
+		if packetCount == 0 && capturedCount > 0 {
+			packetCount = int(capturedCount)
+		}
 
 		data := map[string]interface{}{
 			"system": map[string]interface{}{
@@ -850,7 +980,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request, api *ApiState) {
 				"ml_enabled":         mlEnabled,
 				"gateway_ip":         gatewayIP,
 			},
-			"platform": platform.GetInfo(),
+			"platform":  platform.GetInfo(),
 			"telemetry": platform.GetTelemetry(),
 			"metrics": map[string]interface{}{
 				"packets_captured":  capturedCount,
@@ -969,4 +1099,122 @@ func handleAllowlist(w http.ResponseWriter, r *http.Request, api *ApiState) {
 		return
 	}
 	http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+}
+
+func getPrometheusMetrics(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	api.St.Mu.RLock()
+	captured := api.St.PacketsCaptured
+	if captured == 0 && api.St.PacketCount > 0 {
+		captured = uint64(api.St.PacketCount)
+	}
+	inspected := api.St.PacketsInspected
+	if inspected == 0 && api.St.PacketCount > 0 {
+		inspected = uint64(api.St.PacketCount)
+	}
+	dropped := api.St.PacketsDropped
+	activeFlows := api.St.ActiveFlows
+	blockedCount := len(api.St.BlockedIPs)
+	alerts := make(map[string]int)
+	for _, a := range api.St.Alerts {
+		alerts[a.Severity]++
+	}
+	api.St.Mu.RUnlock()
+
+	tiCount := 0
+	if api.ThreatIntel != nil {
+		status := api.ThreatIntel.GetStatus()
+		if c, ok := status["active_ip_indicators"].(int); ok {
+			tiCount += c
+		}
+		if c, ok := status["active_domains"].(int); ok {
+			tiCount += c
+		}
+	}
+
+	clusterOnline := 1
+	if api.HASync != nil {
+		_, clusterOnline = api.HASync.GetSyncMetrics()
+	}
+
+	prom := siem.RenderPrometheusMetrics(captured, dropped, activeFlows, blockedCount, alerts, tiCount, clusterOnline)
+	w.Write([]byte(prom))
+}
+
+func getClusterStatus(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	if api.HASync == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "disabled",
+			"nodes":  []interface{}{},
+		})
+		return
+	}
+	nodes := api.HASync.GetClusterNodes()
+	syncPkts, totalNodes := api.HASync.GetSyncMetrics()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      "active",
+		"total_nodes": totalNodes,
+		"sync_pkts":   syncPkts,
+		"nodes":       nodes,
+	})
+}
+
+func syncCluster(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	if api.HASync != nil {
+		api.HASync.RequestClusterState()
+		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Cluster synchronization request broadcasted"})
+		return
+	}
+	http.Error(w, "Cluster HA Sync is not enabled", http.StatusBadRequest)
+}
+
+func getThreatIntelStatus(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	if api.ThreatIntel == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "disabled"})
+		return
+	}
+	json.NewEncoder(w).Encode(api.ThreatIntel.GetStatus())
+}
+
+func getThreatIntelIndicators(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	if api.ThreatIntel == nil {
+		json.NewEncoder(w).Encode([]interface{}{})
+		return
+	}
+	limit := 50
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	json.NewEncoder(w).Encode(api.ThreatIntel.GetIndicators(limit))
+}
+
+func refreshThreatIntel(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	if api.ThreatIntel == nil {
+		http.Error(w, "Threat Intel Engine is disabled", http.StatusBadRequest)
+		return
+	}
+	go api.ThreatIntel.RefreshFeeds()
+	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Threat intelligence feeds refresh initiated in background"})
+}
+
+func getSIEMStatus(w http.ResponseWriter, r *http.Request, api *ApiState) {
+	w.Header().Set("Content-Type", "application/json")
+	if api.SIEMForwarder == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"enabled": false})
+		return
+	}
+	sent, dropped := api.SIEMForwarder.GetMetrics()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"enabled":       true,
+		"format":        "CEF",
+		"events_sent":   sent,
+		"events_failed": dropped,
+	})
 }

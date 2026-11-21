@@ -558,6 +558,10 @@ func triggerAlert(st *state.AppState, cfg *config.Config, fm *firewall.FirewallM
 				if srcMAC != "" {
 					st.BlockedMACs[srcMAC] = ipBlock
 				}
+				if st.OnBlockConfirmed != nil {
+					hook := st.OnBlockConfirmed
+					go hook(ipBlock)
+				}
 
 				st.AddThreatTimeline(state.ThreatTimeline{
 					Timestamp: currentTime,

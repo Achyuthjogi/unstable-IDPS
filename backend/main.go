@@ -18,7 +18,9 @@ import (
 	"idps-backend/firewall"
 	"idps-backend/platform"
 	"idps-backend/rules"
+	"idps-backend/siem"
 	"idps-backend/state"
+	"idps-backend/threatintel"
 )
 
 func main() {
@@ -62,10 +64,53 @@ func main() {
 
 	appState := state.NewAppState()
 	
-	// Start HA Sync
+	// Start Enterprise HA Sync
 	haSync := state.NewHASync(appState, "node-1", os.Getenv("HA_BIND_ADDR"), []string{})
 	if err := haSync.Start(); err != nil {
 		fmt.Printf("Warning: HA Sync failed to start: %v\n", err)
+	}
+
+	// Start Enterprise Threat Intelligence Engine
+	threatIntelMgr := threatintel.NewManager()
+	threatIntelMgr.StartAutoUpdate(1 * time.Hour)
+	fmt.Printf("Threat Intel     : READY (%d active baseline IOCs)\n", len(threatIntelMgr.GetIndicators(100)))
+
+	// Start Enterprise SIEM & SOAR Forwarder
+	siemCfg := siem.SIEMConfig{
+		SyslogServer: os.Getenv("SIEM_SYSLOG_SERVER"),
+		SyslogProto:  os.Getenv("SIEM_SYSLOG_PROTO"),
+		Format:       "CEF",
+		WebhookURL:   os.Getenv("SOAR_WEBHOOK_URL"),
+		Enabled:      os.Getenv("SIEM_SYSLOG_SERVER") != "",
+	}
+	siemForwarder := siem.NewForwarder(siemCfg)
+	fmt.Printf("SIEM Forwarder   : READY (Format: CEF, Webhook: %v)\n", siemCfg.WebhookURL != "")
+
+	// Wire Enterprise Decoupled Event Hooks
+	appState.OnBlockConfirmed = func(block state.IPBlock) {
+		if haSync != nil {
+			haSync.BroadcastBlock(block)
+		}
+	}
+	appState.OnUnblock = func(ip, mac string) {
+		if haSync != nil {
+			haSync.BroadcastUnblock(ip, mac)
+		}
+	}
+	appState.OnAlertGenerated = func(al state.Alert) {
+		if siemForwarder != nil {
+			siemForwarder.Forward(siem.AlertEvent{
+				ID:        al.ID,
+				Timestamp: time.Unix(0, int64(al.Timestamp*1e9)),
+				RuleID:    al.RuleID,
+				Category:  al.AlertType,
+				Severity:  al.Severity,
+				SrcIP:     al.SourceIP,
+				DstIP:     al.DestIP,
+				Action:    al.Action,
+				Reason:    al.Reason,
+			})
+		}
 	}
 
 	fwManager := firewall.NewFirewallManager()
@@ -110,22 +155,33 @@ func main() {
 	}
 	var engines []*detection.Engine
 	for i := 0; i < workerCount; i++ {
-		engines = append(engines, detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger, mlClient))
+		eng := detection.NewEngine(appState, cfg, fwManager, ruleEngine, alertLogger, mlClient)
+		eng.SetThreatIntel(threatIntelMgr)
+		engines = append(engines, eng)
 	}
 
-	// Start cross-platform packet capture engine
-	stopCapture, err := capture.StartAutoCapture(appState, cfg, fwManager, engines)
-	if err != nil {
-		fmt.Printf("Packet Capture setup FAILED:\n  reason: %v\n", err)
-		os.Exit(1)
+	// Start packet capture engine (Delegated 100% to Suricata if SuricataExclusiveMode is active)
+	var stopCapture func()
+	if cfg.SuricataExclusiveMode {
+		fmt.Println("Packet Analyzer  : 100% SURICATA EXCLUSIVE (Go internal packet sniffer DISABLED)")
+		fmt.Println("Packet Capture   : DELEGATED TO SURICATA DPI")
+		fmt.Println("Threat Detection : 100% SURICATA SIGNATURES & DPI")
+		fmt.Println("Prevention       : RUNNING (Kernel Firewall + Suricata Drops)")
+	} else {
+		var err error
+		stopCapture, err = capture.StartAutoCapture(appState, cfg, fwManager, engines)
+		if err != nil {
+			fmt.Printf("Packet Capture setup WARNING:\n  reason: %v\n", err)
+			fmt.Println("Proceeding with Suricata / REST API / SOC WebSocket...")
+		} else {
+			fmt.Println("Packet Capture   : RUNNING")
+			fmt.Println("Detection        : RUNNING")
+			fmt.Println("Prevention       : RUNNING")
+		}
 	}
-
-	fmt.Println("Packet Capture   : RUNNING")
-	fmt.Println("Detection        : RUNNING")
-	fmt.Println("Prevention       : RUNNING")
 
 	// Start Suricata as Primary DPI Engine across both Linux and Windows
-	if cfg.SuricataPrimaryEngine {
+	if cfg.SuricataPrimaryEngine || cfg.SuricataExclusiveMode {
 		go detection.StartSuricataPrimaryEngine(appState, cfg, fwManager, alertLogger)
 	}
 
@@ -171,6 +227,11 @@ func main() {
 							Severity:  "Info",
 						})
 						appState.Mu.Unlock()
+
+						if appState.OnUnblock != nil {
+							hook := appState.OnUnblock
+							go hook(ip, mac)
+						}
 					}
 				}
 			}
@@ -179,31 +240,60 @@ func main() {
 
 	// Setup API
 	apiState := &api.ApiState{
-		St:          appState,
-		Config:      cfg,
-		Firewall:    fwManager,
-		AlertLogger: alertLogger,
+		St:            appState,
+		Config:        cfg,
+		Firewall:      fwManager,
+		AlertLogger:   alertLogger,
+		HASync:        haSync,
+		ThreatIntel:   threatIntelMgr,
+		SIEMForwarder: siemForwarder,
 	}
 	
 	apiState.Reload = func(oldConfig *config.Config) error {
 		fmt.Println("Reloading configuration and services...")
 		if stopCapture != nil {
 			stopCapture()
+			stopCapture = nil
 		}
 
 		// Re-setup firewall using oldConfig to teardown correctly
 		fwManager.TeardownGateway(oldConfig)
 		err := fwManager.SetupGateway(cfg)
 		if err != nil {
-			fmt.Printf("Gateway reload FAILED: %v\n", err)
+			fmt.Printf("Gateway reload FAILED: %v. Restoring previous gateway configuration...\n", err)
+			fwManager.TeardownGateway(cfg)
+			if oldConfig != nil {
+				_ = fwManager.SetupGateway(oldConfig)
+				if restoreStop, restoreErr := capture.StartAutoCapture(appState, oldConfig, fwManager, engines); restoreErr == nil {
+					stopCapture = restoreStop
+				} else {
+					fmt.Printf("CRITICAL: Failed to restore packet capture after reload failure: %v\n", restoreErr)
+				}
+			}
 			return err
 		}
 		
-		// Restart capture on new interface
-		stopCapture, err = capture.StartAutoCapture(appState, cfg, fwManager, engines)
-		if err != nil {
-			fmt.Printf("Packet Capture reload FAILED: %v\n", err)
-			return err
+		// Restart capture on new interface (if not in Suricata exclusive mode)
+		if !cfg.SuricataExclusiveMode {
+			newStop, err := capture.StartAutoCapture(appState, cfg, fwManager, engines)
+			if err != nil {
+				fmt.Printf("Packet Capture reload FAILED: %v. Restoring previous configuration...\n", err)
+				fwManager.TeardownGateway(cfg)
+				if oldConfig != nil {
+					_ = fwManager.SetupGateway(oldConfig)
+					if !oldConfig.SuricataExclusiveMode {
+						if restoreStop, restoreErr := capture.StartAutoCapture(appState, oldConfig, fwManager, engines); restoreErr == nil {
+							stopCapture = restoreStop
+						} else {
+							fmt.Printf("CRITICAL: Failed to restore packet capture after reload failure: %v\n", restoreErr)
+						}
+					}
+				}
+				return err
+			}
+			stopCapture = newStop
+		} else {
+			fmt.Println("Packet Analyzer  : 100% SURICATA EXCLUSIVE (Go internal packet sniffer DISABLED)")
 		}
 		
 		return nil

@@ -50,6 +50,7 @@ type Config struct {
 
 	// Suricata Primary Engine Config
 	SuricataPrimaryEngine bool
+	SuricataExclusiveMode bool // When true, Go packet sniffer is disabled; Suricata is the sole packet analyzer
 	SuricataEvePath       string
 	SuricataConfigPath    string
 	SuricataBinaryPath    string
@@ -67,10 +68,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("BLOCK_TTL_SECONDS must be > 0 (got %d)", c.BlockTTLSeconds)
 	}
 	if c.PortScanThreshold <= 0 {
-		return fmt.Errorf("PORT_SCAN_THRESHOLD must be > 0 (got %d)", c.PortScanThreshold)
+		return fmt.Errorf("port scan heuristic threshold must be > 0 (got %d)", c.PortScanThreshold)
 	}
 	if c.SYNFloodThreshold <= 0 {
-		return fmt.Errorf("SYN_FLOOD_THRESHOLD must be > 0 (got %d)", c.SYNFloodThreshold)
+		return fmt.Errorf("SYN flood heuristic threshold must be > 0 (got %d)", c.SYNFloodThreshold)
 	}
 	if c.MaxFlows <= 100 {
 		return fmt.Errorf("MAX_FLOWS must be at least 100 (got %d)", c.MaxFlows)
@@ -79,7 +80,9 @@ func (c *Config) Validate() error {
 }
 
 func Load() *Config {
-	_ = godotenv.Load() // Ignore error if .env doesn't exist
+	_ = godotenv.Load(".env")
+	_ = godotenv.Load("backend/.env")
+	_ = godotenv.Load("../backend/.env")
 
 	autoWan, autoLan := DiscoverInterfaces()
 
@@ -94,8 +97,13 @@ func Load() *Config {
 	}
 
 	apiKey := getEnv("API_KEY", "idps_demo_key")
+	apiHost := getEnv("API_HOST", "0.0.0.0")
 	if apiKey == "idps_demo_key" {
-		fmt.Printf("WARNING: Using default API key '%s' — set API_KEY in .env for production\n", apiKey)
+		if apiHost == "0.0.0.0" {
+			fmt.Printf("SECURITY ALERT: API is listening on 0.0.0.0 with default admin key '%s'. For production, configure API_KEY and set API_HOST=127.0.0.1 in .env\n", apiKey)
+		} else {
+			fmt.Printf("WARNING: Using default API key '%s' — set API_KEY in .env for production\n", apiKey)
+		}
 	}
 
 	cfg := &Config{
@@ -110,12 +118,12 @@ func Load() *Config {
 		LanInterface:            getEnv("LAN_INTERFACE", autoLan),
 		ApiHost:                 getEnv("API_HOST", "0.0.0.0"),
 		FirewallDryRun:          getEnvBool("FIREWALL_DRY_RUN", false),
-		SuspiciousRateThreshold: getEnvInt("SUSPICIOUS_RATE_THRESHOLD", 5000),
-		PortScanThreshold:       getEnvInt("PORT_SCAN_THRESHOLD", 20),
-		ICMPFloodThreshold:      getEnvInt("ICMP_FLOOD_THRESHOLD", 100),
-		UDPFloodThreshold:       getEnvInt("UDP_FLOOD_THRESHOLD", 200),
-		SYNFloodThreshold:       getEnvInt("SYN_FLOOD_THRESHOLD", 150),
-		SSHBruteForceThreshold:  getEnvInt("SSH_BRUTE_FORCE_THRESHOLD", 10),
+		SuspiciousRateThreshold: 5000,
+		PortScanThreshold:       20,
+		ICMPFloodThreshold:      100,
+		UDPFloodThreshold:       200,
+		SYNFloodThreshold:       150,
+		SSHBruteForceThreshold:  10,
 		BlockTTLSeconds:         getEnvInt("BLOCK_TTL_SECONDS", 600),
 		GatewayIP:               getEnv("GATEWAY_IP", DiscoverGatewayIP()),
 		WorkerCount:             getEnvInt("WORKER_COUNT", runtime.NumCPU()),
@@ -127,6 +135,7 @@ func Load() *Config {
 		MLServiceURL:            getEnv("ML_SERVICE_URL", "http://localhost:5001"),
 		MLEnabled:               getEnvBool("ML_ENABLED", true),
 		SuricataPrimaryEngine:   getEnvBool("SURICATA_PRIMARY_ENGINE", true),
+		SuricataExclusiveMode:   getEnvBool("SURICATA_EXCLUSIVE_MODE", false), // Default to false: Go packet engine operates alongside Suricata
 		SuricataEvePath:         getEnv("SURICATA_EVE_PATH", ""),
 		SuricataConfigPath:      getEnv("SURICATA_CONFIG_PATH", ""),
 		SuricataBinaryPath:      getEnv("SURICATA_BINARY_PATH", ""),
@@ -200,6 +209,11 @@ func (c *Config) Clone() *Config {
 		MaxReassembly:           c.MaxReassembly,
 		MLServiceURL:            c.MLServiceURL,
 		MLEnabled:               c.MLEnabled,
+		SuricataPrimaryEngine:   c.SuricataPrimaryEngine,
+		SuricataExclusiveMode:   c.SuricataExclusiveMode,
+		SuricataEvePath:         c.SuricataEvePath,
+		SuricataConfigPath:      c.SuricataConfigPath,
+		SuricataBinaryPath:      c.SuricataBinaryPath,
 	}
 }
 
@@ -217,14 +231,6 @@ func (c *Config) SaveToEnv(filepath string) error {
 		envMap = make(map[string]string) // Create new if doesn't exist
 	}
 
-	// Update all thresholds
-	envMap["SUSPICIOUS_RATE_THRESHOLD"] = strconv.Itoa(c.SuspiciousRateThreshold)
-	envMap["PORT_SCAN_THRESHOLD"] = strconv.Itoa(c.PortScanThreshold)
-	envMap["ICMP_FLOOD_THRESHOLD"] = strconv.Itoa(c.ICMPFloodThreshold)
-	envMap["UDP_FLOOD_THRESHOLD"] = strconv.Itoa(c.UDPFloodThreshold)
-	envMap["SYN_FLOOD_THRESHOLD"] = strconv.Itoa(c.SYNFloodThreshold)
-	envMap["SSH_BRUTE_FORCE_THRESHOLD"] = strconv.Itoa(c.SSHBruteForceThreshold)
-
 	// Update general settings
 	envMap["IDPS_DEPLOYMENT_MODE"] = c.IDPSDeploymentMode
 	envMap["IDPS_SECURITY_MODE"] = c.IDPSSecurityMode
@@ -232,6 +238,8 @@ func (c *Config) SaveToEnv(filepath string) error {
 	envMap["LAN_INTERFACE"] = c.LanInterface
 	envMap["CAPTURE_INTERFACE"] = c.CaptureInterface
 	envMap["INTERFACE"] = c.Interface
+	envMap["GATEWAY_IP"] = c.GatewayIP
+	envMap["API_HOST"] = c.ApiHost
 	if c.MLEnabled {
 		envMap["ML_ENABLED"] = "true"
 	} else {

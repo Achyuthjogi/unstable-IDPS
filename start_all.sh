@@ -17,12 +17,35 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Load backend/.env if present to inherit environment settings
+if [ -f "backend/.env" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source <(grep -v '^#' backend/.env | grep -v '^[[:space:]]*$')
+    set +a
+fi
+
+# Detect primary network interface
+ACTIVE_IFACE="${CAPTURE_INTERFACE:-${LAN_INTERFACE:-$INTERFACE}}"
+if [ -z "$ACTIVE_IFACE" ]; then
+    ACTIVE_IFACE=$(ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+fi
+if [ -z "$ACTIVE_IFACE" ]; then
+    ACTIVE_IFACE=$(ip -o link show up 2>/dev/null | awk -F': ' '$2 != "lo" {print $2}' | head -n 1)
+fi
+if [ -z "$ACTIVE_IFACE" ]; then
+    ACTIVE_IFACE="wlp1s0"
+fi
+export LAN_INTERFACE="${LAN_INTERFACE:-$ACTIVE_IFACE}"
+export CAPTURE_INTERFACE="${CAPTURE_INTERFACE:-$ACTIVE_IFACE}"
+export INTERFACE="${INTERFACE:-$ACTIVE_IFACE}"
+
 # Ensure PATH includes user local bin even if executed via sudo
 if [ -n "$SUDO_USER" ]; then
     SUDO_USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
     export PATH="$SUDO_USER_HOME/.local/bin:$SUDO_USER_HOME/bin:$PATH"
 fi
-export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/var/lib/snapd/snap/bin:$PATH"
+export PATH="/home/dell/.local/bin:$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/var/lib/snapd/snap/bin:$PATH"
 
 # Extended Node/npm detection (NVM, FNM, ASDF, Snap, Local)
 if ! command -v npm >/dev/null 2>&1; then
@@ -42,18 +65,26 @@ if ! command -v npm >/dev/null 2>&1; then
 fi
 
 echo -e "${BLUE}======================================================${NC}"
-echo -e "${BLUE}   Nexus Enterprise IDPS - System Launcher (v2.0)    ${NC}"
+echo -e "${BLUE}  IDPS - System Launcher    ${NC}"
 echo -e "${BLUE}======================================================${NC}"
 
 # Detect OS
 OS_NAME="$(uname -s 2>/dev/null || echo "Unknown")"
 echo -e "${CYAN}[*] Platform Detected:${NC} $OS_NAME ($(uname -m 2>/dev/null || echo "x86_64"))"
 
-# Selection of UI Mode
-# 1 = Web SOC Dashboard (React + Vite)
-# 2 = Terminal CLI Dashboard
-# 3 = Headless Daemon / API Only
-UI_MODE="${1:-1}"
+# Selection of Mode
+# 1 = Web SOC Dashboard (React + Vite) [Default]
+# 2 = Headless Daemon / REST API Only
+UI_MODE="1"
+DAEMON_MODE=false
+
+for arg in "$@"; do
+    if [ "$arg" = "2" ] || [ "$arg" = "--headless" ]; then
+        UI_MODE="2"
+    elif [ "$arg" = "--daemon" ] || [ "$arg" = "-d" ] || [ "$arg" = "daemon" ]; then
+        DAEMON_MODE=true
+    fi
+done
 
 # Verify npm availability if Web Mode is selected
 HAS_NPM=true
@@ -64,7 +95,7 @@ if ! command -v npm >/dev/null 2>&1; then
         echo -e "    Web SOC dashboard requires Node.js/npm."
         echo -e "    Falling back to Backend Engine + API Headless Mode."
         echo -e "    (To enable Web UI: 'sudo dnf install -y nodejs npm' or 'sudo apt-get install -y nodejs npm')"
-        UI_MODE="3"
+        UI_MODE="2"
     fi
 fi
 
@@ -77,7 +108,7 @@ cleanup() {
     if [ -n "$ML_PID" ]; then
         kill $ML_PID 2>/dev/null || true
     fi
-    if [ "$UI_MODE" = "2" ] || [ "$UI_MODE" = "3" ]; then
+    if [ "$UI_MODE" = "2" ]; then
         sudo killall idps-backend 2>/dev/null || true
     fi
     
@@ -163,25 +194,21 @@ fi
 # ── 3. Compile Go Core Engine ─────────────────────────────────────────
 echo -e "${GREEN}--> [3/3] Compiling Nexus Core Engine...${NC}"
 cd backend
-if [ ! -f "idps-backend" ] || [ main.go -nt idps-backend ]; then
-    go build -o idps-backend .
-    echo -e "    ${GREEN}[+] Compilation successful: backend/idps-backend${NC}"
-else
-    echo -e "    ${GREEN}[+] Binary up to date: backend/idps-backend${NC}"
-fi
-
-if [ "$UI_MODE" = "2" ]; then
-    echo -e "${GREEN}--> Compiling CLI Dashboard...${NC}"
-    go build -o idps-cli cmd/cli/main.go
-fi
+go build -o idps-backend .
+echo -e "    ${GREEN}[+] Go Core Engine ready: backend/idps-backend${NC}"
 
 # Suricata Primary Engine Check & Synchronization
 if command -v suricata >/dev/null 2>&1; then
-    echo -e "${GREEN}--> [3.5] Starting/Synchronizing Suricata Primary Engine...${NC}"
+    echo -e "${GREEN}--> [3.5] Starting/Synchronizing Suricata Primary Engine on $ACTIVE_IFACE...${NC}"
+    SURICATA_CONF="/etc/suricata/suricata.yaml"
+    SURICATA_ARGS=("-i" "$ACTIVE_IFACE" "-D")
+    if [ -f "$SURICATA_CONF" ]; then
+        SURICATA_ARGS=("-c" "$SURICATA_CONF" "${SURICATA_ARGS[@]}")
+    fi
     if [ "$EUID" -eq 0 ]; then
-        systemctl restart suricata 2>/dev/null || suricata -c /etc/suricata/suricata.yaml -i "${LAN_INTERFACE:-eth0}" -D 2>/dev/null || true
+        systemctl restart suricata 2>/dev/null || suricata "${SURICATA_ARGS[@]}" > logs/suricata.log 2>&1 || true
     else
-        sudo systemctl restart suricata 2>/dev/null || sudo suricata -c /etc/suricata/suricata.yaml -i "${LAN_INTERFACE:-eth0}" -D 2>/dev/null || true
+        sudo systemctl restart suricata 2>/dev/null || sudo suricata "${SURICATA_ARGS[@]}" > logs/suricata.log 2>&1 || true
     fi
     echo -e "    ${GREEN}[✓] Suricata active as primary DPI engine.${NC}"
 else
@@ -204,8 +231,6 @@ else
 fi
 if [ "$UI_MODE" = "1" ]; then
     echo -e "${GREEN}  [✓] SOC Dashboard:    http://localhost:5173 ${NC}"
-elif [ "$UI_MODE" = "2" ]; then
-    echo -e "${CYAN}  [✓] Console Mode:     Terminal Interactive CLI ${NC}"
 else
     echo -e "${CYAN}  [✓] Engine Mode:      Headless Daemon & REST API ${NC}"
 fi
@@ -224,30 +249,50 @@ if [ "$UI_MODE" = "1" ] && [ "$FRONTEND_READY" = true ] && [ -n "$DISPLAY" ] && 
 fi
 
 # ── 4. Launch Core Engine ─────────────────────────────────────────────
-if [ "$UI_MODE" = "1" ] || [ "$UI_MODE" = "3" ]; then
-    # Run Backend in foreground for Web or Headless Mode
-    echo -e "${GREEN}--> Launching Packet Engine (elevated permissions required)...${NC}"
+echo -e "${GREEN}--> Launching Packet Engine (elevated permissions required)...${NC}"
+mkdir -p ../logs 2>/dev/null || true
+
+if [ "$DAEMON_MODE" = true ]; then
+    if [ "$EUID" -eq 0 ]; then
+        GODEBUG=cgocheck=0 ./idps-backend > ../logs/backend.log 2>&1 &
+        BACKEND_PID=$!
+    else
+        sudo -E GODEBUG=cgocheck=0 ./idps-backend > ../logs/backend.log 2>&1 &
+        BACKEND_PID=$!
+    fi
+    cd ..
+    echo "$ML_PID" > .idps_pids
+    echo "$FRONTEND_PID" >> .idps_pids
+    echo "$BACKEND_PID" >> .idps_pids
+
+    echo ""
+    echo -e "${GREEN}======================================================${NC}"
+    echo -e "${GREEN}  [✓] All IDPS Services Running in the BACKGROUND!     ${NC}"
+    echo -e "${GREEN}======================================================${NC}"
+    echo -e "  • SOC Dashboard : ${CYAN}http://localhost:5173${NC}"
+    echo -e "  • Go REST/WS    : ${CYAN}http://localhost:8000${NC}"
+    echo -e "  • ML Server     : ${CYAN}http://localhost:5001${NC}"
+    echo -e ""
+    echo -e "  You can run simulated attacks in ${GREEN}THIS SAME TERMINAL${NC}:"
+    echo -e "    ${CYAN}sudo python3 ids_demo_attacks.py --attack syn --count 200${NC}"
+    echo -e ""
+    echo -e "  To stop all IDPS services at any time:"
+    echo -e "    ${YELLOW}sudo ./stop_all.sh${NC}"
+    echo -e "${GREEN}======================================================${NC}"
+    exit 0
+else
+    echo -e "${YELLOW}------------------------------------------------------${NC}"
+    echo -e "${YELLOW}[!] Keep this terminal window OPEN.${NC}"
+    echo -e "    Do not press Ctrl+C while viewing the SOC dashboard."
+    echo -e "    To simulate attacks, open a ${CYAN}second terminal${NC} and run:"
+    echo -e "      ${CYAN}sudo python3 ids_demo_attacks.py --attack syn${NC}"
+    echo -e "    (Or run with '${CYAN}sudo ./start_all.sh --daemon${NC}' to run in background)"
+    echo -e "${YELLOW}------------------------------------------------------${NC}"
+    echo ""
     if [ "$EUID" -eq 0 ]; then
         GODEBUG=cgocheck=0 ./idps-backend
     else
-        sudo GODEBUG=cgocheck=0 ./idps-backend
+        sudo -E GODEBUG=cgocheck=0 ./idps-backend
     fi
-else
-    # Run Backend in background and start CLI in foreground
-    if [ "$EUID" -eq 0 ]; then
-        GODEBUG=cgocheck=0 ./idps-backend > ../logs/backend.log 2>&1 &
-    else
-        sudo GODEBUG=cgocheck=0 ./idps-backend > ../logs/backend.log 2>&1 &
-    fi
-    
-    echo -e "${GREEN}--> Waiting for Backend API...${NC}"
-    sleep 2
-
-    if [ "$EUID" -eq 0 ] && [ -n "$SUDO_USER" ]; then
-        sudo -u "$SUDO_USER" ./idps-cli
-    else
-        ./idps-cli
-    fi
+    cleanup
 fi
-
-cleanup

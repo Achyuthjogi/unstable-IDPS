@@ -4,12 +4,19 @@ IDPS ML Inference Microservice (Production-Ready)
 Loads the trained DNN model + StandardScaler and serves predictions via FastAPI on port 5001.
 """
 import os, sys, warnings
-import numpy as np
-import joblib
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+try:
+    import numpy as np
+    import joblib
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
+    import uvicorn
+except ImportError as e:
+    print(f"[!] Missing required ML dependency: {e}", file=sys.stderr)
+    print("    Please run the launcher: bash backend/start_ml.sh", file=sys.stderr)
+    print("    Or install dependencies: pip install fastapi uvicorn joblib scikit-learn pandas pydantic", file=sys.stderr)
+    sys.exit(1)
 
 MODEL_PATH = os.environ.get("ML_MODEL_PATH", os.path.join(os.path.dirname(__file__), "..", "zero_day_model.joblib"))
 SCALER_PATH = os.environ.get("ML_SCALER_PATH", os.path.join(os.path.dirname(__file__), "..", "feature_scaler.joblib"))

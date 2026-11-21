@@ -108,6 +108,11 @@ type AppState struct {
 
 	ActiveConnections int
 	LastAlertTimes    map[string]float64
+
+	// Enterprise Event Hooks for HA Cluster Sync and SIEM
+	OnBlockConfirmed func(block IPBlock)
+	OnUnblock        func(ip, mac string)
+	OnAlertGenerated func(alert Alert)
 }
 
 func NewAppState() *AppState {
@@ -142,6 +147,10 @@ func (s *AppState) AddAlert(alert Alert) {
 	s.Alerts = append(s.Alerts, alert)
 	if len(s.Alerts) > 1000 {
 		s.Alerts = s.Alerts[1:]
+	}
+	if s.OnAlertGenerated != nil {
+		hook := s.OnAlertGenerated
+		go hook(alert)
 	}
 }
 

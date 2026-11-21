@@ -1,89 +1,138 @@
-import { useState, useMemo, useEffect, useCallback, memo, useRef } from 'react';
-import { Activity, AlertOctagon, ShieldAlert, Cpu, Network, ArrowUpRight, Ban, X, Monitor, Maximize, Search, Filter, BrainCircuit } from 'lucide-react';
+import { useState, useMemo, useCallback, memo, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
+import { 
+  Activity, 
+  X, 
+  Monitor, 
+  Cpu, 
+  CheckCircle2, 
+  ExternalLink 
+} from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Cell } from 'recharts';
-import { format } from 'date-fns';
+import { safeFormatTime, safeToFixed, safeLocaleString } from '../utils/format';
 
 const API_HOST = window.location.hostname;
 const API_BASE = `http://${API_HOST}:8000`;
 const API_KEY = import.meta.env.VITE_API_KEY || '';
 
-/**
- * Memoized KPI card — only re-renders when its specific props change,
- * not when the parent Dashboard re-renders from a WS tick.
- */
-const KpiCard = memo(function KpiCard({ title, value, icon, trend, alert = false, onClick }: {
-  title: string; value: string; icon: React.ReactNode; trend: string; alert?: boolean; onClick?: () => void;
+const KpiCard = memo(function KpiCard({
+  title,
+  value,
+  subtitle,
+  onClick,
+}: {
+  title: string;
+  value: string;
+  subtitle: string;
+  onClick?: () => void;
 }) {
   return (
     <div
-      className={`kinetic-card rounded-2xl p-6 transition-colors duration-300 ${alert ? 'border-red-500/50 shadow-[0_0_20px_rgba(239,68,68,0.2)]' : ''} ${onClick ? 'cursor-pointer hover:border-primary/50' : ''}`}
       onClick={onClick}
+      className={`card p-4 flex flex-col justify-between ${
+        onClick ? 'cursor-pointer hover:border-primary/50' : ''
+      }`}
     >
-      <div className="flex items-center justify-between mb-4 w-full">
-        <h3 className="text-sm font-medium text-muted-foreground">{title}</h3>
-        <div className="p-2 kinetic-card rounded-xl">{icon}</div>
+      <span className="text-xs text-muted-foreground font-medium">{title}</span>
+      <div className="my-2">
+        <span className="text-2xl font-bold tracking-tight text-foreground">{value}</span>
       </div>
-      <div className="flex items-baseline gap-2">
-        <h2 className="text-3xl font-bold tracking-tight text-primary text-glow">{value}</h2>
-      </div>
-      <p className="text-xs text-muted-foreground mt-2">{trend}</p>
+      <span className="text-[11px] text-muted-foreground">{subtitle}</span>
     </div>
   );
 });
 
-/**
- * Memoized chart wrapper — Recharts is expensive to re-render.
- * Only re-renders when packetHistory length changes (new data point added).
- */
-const TrafficChart = memo(function TrafficChart({ data, gradientId = "colorPackets", strokeWidth = 3 }: {
-  data: { time: string; packets: number }[];
-  gradientId?: string;
-  strokeWidth?: number;
+const TrafficChart = memo(function TrafficChart({
+  data,
+}: {
+  data: { time: string; packets: number; cumulative?: number }[];
 }) {
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <AreaChart data={data}>
+      <AreaChart data={data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
         <defs>
-          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.8} />
-            <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0.2} />
+          <linearGradient id="packetsGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%" stopColor="var(--color-primary)" stopOpacity={0.2} />
+            <stop offset="95%" stopColor="var(--color-primary)" stopOpacity={0.0} />
           </linearGradient>
         </defs>
-        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-        <XAxis dataKey="time" stroke="hsl(var(--muted-foreground))" fontSize={12} tickLine={false} axisLine={false} />
-        <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(val) => `${val >= 1000 ? (val / 1000).toFixed(1) + 'k' : val}`} />
-        <Tooltip
-          contentStyle={{ backgroundColor: 'var(--color-background)', borderColor: 'transparent', borderRadius: '1rem', boxShadow: '8px 8px 16px #1c1f22, -8px -8px 16px #363b42' }}
-          itemStyle={{ color: 'var(--color-foreground)' }}
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
+        <XAxis
+          dataKey="time"
+          stroke="var(--color-muted-foreground)"
+          fontSize={10}
+          tickLine={false}
+          axisLine={false}
         />
-        <Area type="monotone" dataKey="packets" stroke="hsl(var(--primary))" strokeWidth={strokeWidth} fillOpacity={1} fill={`url(#${gradientId})`} />
+        <YAxis
+          stroke="var(--color-muted-foreground)"
+          fontSize={10}
+          tickLine={false}
+          axisLine={false}
+          tickFormatter={(val) => (val >= 1000 ? `${(val / 1000).toFixed(1)}k` : val)}
+        />
+        <Tooltip
+          contentStyle={{
+            backgroundColor: 'var(--color-card)',
+            borderColor: 'var(--color-border)',
+            borderRadius: '6px',
+            fontSize: '11px',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+          }}
+          itemStyle={{ color: 'var(--color-foreground)' }}
+          formatter={(val: any) => [`${safeLocaleString(val)} pkts/s`, 'Rate']}
+        />
+        <Area
+          type="monotone"
+          dataKey="packets"
+          stroke="var(--color-primary)"
+          strokeWidth={1.5}
+          fill="url(#packetsGradient)"
+          isAnimationActive={false}
+        />
       </AreaChart>
     </ResponsiveContainer>
   );
-}, (prev, next) => prev.data.length === next.data.length && prev.data[prev.data.length - 1]?.packets === next.data[next.data.length - 1]?.packets);
+});
 
-/**
- * Memoized protocol bar chart
- */
-const ProtocolChart = memo(function ProtocolChart({ protocolCounts }: { protocolCounts: Record<string, number> }) {
-  const chartData = useMemo(
-    () => Object.entries(protocolCounts).map(([name, value]) => ({ name, value })),
-    [protocolCounts]
-  );
+const ProtocolChart = memo(function ProtocolChart({
+  protocolCounts,
+}: {
+  protocolCounts: Record<string, number>;
+}) {
+  const chartData = useMemo(() => {
+    if (!protocolCounts || typeof protocolCounts !== 'object') return [];
+    return Object.entries(protocolCounts).map(([name, value]) => ({
+      name,
+      value: Number(value) || 0,
+    }));
+  }, [protocolCounts]);
 
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <BarChart data={chartData}>
-        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-        <XAxis dataKey="name" stroke="hsl(var(--muted-foreground))" fontSize={12} tickLine={false} axisLine={false} />
-        <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} tickLine={false} axisLine={false} />
-        <Tooltip
-          cursor={{ fill: 'rgba(0,0,0,0.1)' }}
-          contentStyle={{ backgroundColor: 'var(--color-background)', borderColor: 'transparent', borderRadius: '1rem', boxShadow: '8px 8px 16px #1c1f22, -8px -8px 16px #363b42' }}
+      <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
+        <XAxis
+          dataKey="name"
+          stroke="var(--color-muted-foreground)"
+          fontSize={10}
+          tickLine={false}
+          axisLine={false}
         />
-        <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+        <YAxis stroke="var(--color-muted-foreground)" fontSize={10} tickLine={false} axisLine={false} />
+        <Tooltip
+          cursor={{ fill: 'var(--color-secondary)' }}
+          contentStyle={{
+            backgroundColor: 'var(--color-card)',
+            borderColor: 'var(--color-border)',
+            borderRadius: '6px',
+            fontSize: '11px',
+          }}
+          formatter={(val: any) => [safeLocaleString(val), 'Packets']}
+        />
+        <Bar dataKey="value" fill="var(--color-primary)" radius={[3, 3, 0, 0]}>
           {chartData.map((_, index) => (
-            <Cell key={`cell-${index}`} fill={`hsl(var(--primary))`} opacity={0.8 + (index % 3) * 0.1} />
+            <Cell key={`cell-${index}`} fill="var(--color-primary)" opacity={0.8 + (index % 3) * 0.1} />
           ))}
         </Bar>
       </BarChart>
@@ -92,102 +141,118 @@ const ProtocolChart = memo(function ProtocolChart({ protocolCounts }: { protocol
 });
 
 export default function Dashboard({ data, status }: { data: any; status: string }) {
-  // Keep local history of packet rates for the chart
-  const [packetHistory, setPacketHistory] = useState<{ time: string; packets: number }[]>([]);
+  const [packetHistory, setPacketHistory] = useState<{ time: string; packets: number; cumulative?: number }[]>(() => {
+    const now = Date.now();
+    return Array.from({ length: 14 }, (_, i) => ({
+      time: safeFormatTime(new Date(now - (13 - i) * 2000)),
+      packets: 0,
+    }));
+  });
   const [showDevicesModal, setShowDevicesModal] = useState(false);
-  const [showTrafficModal, setShowTrafficModal] = useState(false);
-  const [showLiveTrafficModal, setShowLiveTrafficModal] = useState(false);
-  const [filterIP, setFilterIP] = useState<string>('');
-
-  // Track previous packet count to avoid adding duplicate history entries
-  const prevPacketCount = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (data?.network?.packet_count !== undefined) {
-      const newCount = data.network.packet_count;
-      // Only add a new history point if the count actually changed
-      if (prevPacketCount.current !== newCount) {
-        prevPacketCount.current = newCount;
-        setPacketHistory(prev => {
-          const newHist = [...prev, { time: new Date().toLocaleTimeString(), packets: newCount }];
-          if (newHist.length > 20) return newHist.slice(newHist.length - 20);
-          return newHist;
-        });
-      }
-    }
-  }, [data?.network?.packet_count]);
 
   const mergedIPs = useMemo(() => {
     if (!data) return [];
-    const ipMap = new Map();
-    if (data.network?.top_src_ips) {
+    const ipMap = new Map<string, { ip: string; count: number; mac: string; status: string }>();
+
+    if (data.network?.top_src_ips && Array.isArray(data.network.top_src_ips)) {
       data.network.top_src_ips.forEach((item: any) => {
-        ipMap.set(item.ip, { ip: item.ip, count: item.count, mac: 'Unknown', status: 'Active Traffic' });
+        if (!item?.ip) return;
+        ipMap.set(item.ip, {
+          ip: item.ip,
+          count: Number(item.count) || 0,
+          mac: 'Unknown',
+          status: 'Active',
+        });
       });
     }
-    if (data.devices) {
+
+    if (data.devices && Array.isArray(data.devices)) {
       data.devices.forEach((device: any) => {
+        if (!device?.ip) return;
         if (ipMap.has(device.ip)) {
-          ipMap.set(device.ip, { ...ipMap.get(device.ip), mac: device.mac });
+          ipMap.set(device.ip, { ...ipMap.get(device.ip)!, mac: device.mac || 'Unknown' });
         } else {
-          ipMap.set(device.ip, { ip: device.ip, count: 0, mac: device.mac, status: 'Connected (Idle)' });
+          ipMap.set(device.ip, {
+            ip: device.ip,
+            count: 0,
+            mac: device.mac || 'Unknown',
+            status: 'Idle',
+          });
         }
       });
     }
+
     return Array.from(ipMap.values()).sort((a, b) => b.count - a.count);
   }, [data?.network?.top_src_ips, data?.devices]);
 
   const blockedIPs = useMemo(() => {
-    if (!data?.blocked) return [];
-    return data.blocked.map((b: any) => typeof b === 'string' ? b : b.ip);
+    if (!data?.blocked || !Array.isArray(data.blocked)) return [];
+    return data.blocked.map((b: any) => (typeof b === 'string' ? b : b?.ip || '')).filter(Boolean);
   }, [data?.blocked]);
 
-  // Stable reference for filtered alerts (avoids re-computing on every render)
   const activeAlerts = useMemo(() => {
-    if (!data?.alerts) return [];
-    return data.alerts.filter((a: any) => !blockedIPs.includes(a.source_ip));
+    if (!data?.alerts || !Array.isArray(data.alerts)) return [];
+    return data.alerts.filter((a: any) => a && !blockedIPs.includes(a.source_ip));
   }, [data?.alerts, blockedIPs]);
 
   const reversedAlerts = useMemo(() => [...activeAlerts].reverse(), [activeAlerts]);
 
-  // Stable callbacks for modals
+  const livePacketRate = packetHistory[packetHistory.length - 1]?.packets ?? 0;
+
   const openDevices = useCallback(() => setShowDevicesModal(true), []);
   const closeDevices = useCallback(() => setShowDevicesModal(false), []);
-  const openTraffic = useCallback(() => setShowTrafficModal(true), []);
-  const closeTraffic = useCallback(() => setShowTrafficModal(false), []);
-  const openLiveTraffic = useCallback(() => setShowLiveTrafficModal(true), []);
-  const closeLiveTraffic = useCallback(() => { setShowLiveTrafficModal(false); setFilterIP(''); }, []);
+
+  const lastPacketCountRef = useRef<number | null>(null);
+  const lastTimeRef = useRef<number>(Date.now());
+
+  useEffect(() => {
+    if (!data) return;
+
+    const currentTotal = Number(data.metrics?.packets_captured ?? data.network?.packet_count ?? 0);
+    const now = Date.now();
+
+    if (lastPacketCountRef.current === null) {
+      lastPacketCountRef.current = currentTotal;
+      lastTimeRef.current = now;
+      return;
+    }
+
+    const elapsedSeconds = Math.max(0.5, (now - lastTimeRef.current) / 1000);
+    const deltaPackets = Math.max(0, currentTotal - lastPacketCountRef.current);
+    const packetRate = Math.round(deltaPackets / elapsedSeconds);
+
+    lastPacketCountRef.current = currentTotal;
+    lastTimeRef.current = now;
+
+    setPacketHistory((prev) => {
+      const nextPoint = { time: safeFormatTime(new Date(now)), packets: packetRate, cumulative: currentTotal };
+      const updated = [...prev, nextPoint];
+      return updated.length > 20 ? updated.slice(updated.length - 20) : updated;
+    });
+  }, [data?.network?.packet_count, data?.metrics?.packets_captured, data]);
 
   if (!data) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-4 text-muted-foreground">
-        <div className="w-12 h-12 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-        <p className="animate-pulse">Initializing Detection Engine...</p>
+      <div className="flex flex-col items-center justify-center h-72 text-muted-foreground text-xs">
+        <Activity className="w-5 h-5 animate-spin mb-2 text-primary" />
+        <span>Initializing telemetry connection...</span>
       </div>
     );
   }
 
-  const { system, network, alerts, devices, blocked, traffic_log } = data;
-  const platform = data.platform || {
-    os: 'linux',
-    arch: 'amd64',
-    hostname: 'sensor-host',
-    is_elevated: true,
-    capture_driver: 'AF_PACKET',
-    firewall_backend: 'iptables',
-    has_inline_engine: true,
-  };
-  const telemetry = data.telemetry || {
-    cpu_percent: system?.cpu || 0,
-    memory_percent: system?.memory || 0,
-    uptime_seconds: 0,
-    goroutine_count: 0,
-  };
+  const system = data.system || {};
+  const network = data.network || {};
+  const alerts = Array.isArray(data.alerts) ? data.alerts : [];
+  const devices = Array.isArray(data.devices) ? data.devices : [];
+  const blocked = Array.isArray(data.blocked) ? data.blocked : [];
   const metrics = data.metrics || {};
-  const isWindows = (platform.os || '').toLowerCase() === 'windows';
+  const telemetry = data.telemetry || {
+    cpu_percent: system.cpu || 0,
+    uptime_seconds: 0,
+  };
 
   const formatUptime = (seconds: number) => {
-    if (!seconds) return 'Live';
+    if (!seconds || seconds <= 0) return 'Just started';
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     if (h > 0) return `${h}h ${m}m`;
@@ -195,537 +260,284 @@ export default function Dashboard({ data, status }: { data: any; status: string 
   };
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto pb-12">
-      {/* Enterprise Header with Sensor & OS Health */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+    <div className="max-w-6xl mx-auto space-y-6">
+      {/* Top Header & Telemetry Status Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-3">
-            <h2 className="text-3xl font-bold tracking-tight">Security Operations Center</h2>
-            <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold font-mono uppercase tracking-wider flex items-center gap-1.5 ${
-              isWindows
-                ? 'bg-sky-500/10 text-sky-400 border border-sky-500/30'
-                : 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-            }`}>
-              <span>{isWindows ? '🪟 Windows' : '🐧 Linux'}</span>
-              <span className="text-[10px] opacity-75">({platform.arch})</span>
-            </span>
-            <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider ${
-              platform.is_elevated
-                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                : 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
-            }`}>
-              {platform.is_elevated ? (isWindows ? 'Admin Privileges' : 'Root Privileges') : 'Unprivileged'}
-            </span>
-          </div>
-          <p className="text-muted-foreground text-sm mt-0.5">
-            Engine: <span className="text-primary font-mono font-medium">{platform.capture_driver || 'AF_PACKET'}</span> &bull; Firewall: <span className="text-primary font-mono font-medium">{platform.firewall_backend || 'iptables'}</span>
-          </p>
+          <h1 className="text-xl font-semibold tracking-tight">System Overview</h1>
+          <p className="text-xs text-muted-foreground mt-0.5">Live sensor metrics and intrusion inspection statistics.</p>
         </div>
 
-        {/* Telemetry Bar */}
-        <div className="flex flex-wrap items-center gap-3 kinetic-card px-4 py-2.5 rounded-xl text-xs">
-          <div className="flex items-center gap-2">
-            <span className={`w-2.5 h-2.5 rounded-full ${status === 'connected' ? 'bg-green-500' : 'bg-red-500'} animate-pulse`} />
-            <span className="font-semibold">{status === 'connected' ? 'Sensor Online' : 'Connecting...'}</span>
-          </div>
-          <div className="w-px h-5 bg-border/40" />
+        {/* Minimalist System Status Pill */}
+        <div className="flex items-center gap-3 text-xs text-muted-foreground bg-card border border-border px-3 py-1.5 rounded-md self-start sm:self-auto font-mono">
           <div className="flex items-center gap-1.5">
+            <span className={`w-2 h-2 rounded-full ${status === 'connected' ? 'bg-success' : 'bg-destructive'}`} />
+            <span className="text-foreground font-sans text-xs">{status === 'connected' ? 'Online' : 'Offline'}</span>
+          </div>
+          <span className="text-border">|</span>
+          <div className="flex items-center gap-1">
             <Cpu className="w-3.5 h-3.5 text-muted-foreground" />
-            <span className="font-mono">{system.cpu.toFixed(1)}% CPU</span>
+            <span>{safeToFixed(telemetry.cpu_percent || system.cpu, 1)}%</span>
           </div>
-          <div className="w-px h-5 bg-border/40" />
-          <div className="flex items-center gap-1.5">
-            <Network className="w-3.5 h-3.5 text-muted-foreground" />
-            <span className="font-mono">{system.gateway_ip || 'Local Host'}</span>
-          </div>
-          <div className="w-px h-5 bg-border/40" />
-          <div className="flex items-center gap-1.5 font-mono text-muted-foreground">
-            <span>Uptime: {formatUptime(telemetry.uptime_seconds)}</span>
-          </div>
-          <div className="w-px h-5 bg-border/40" />
-          <div
-            className="flex items-center gap-1.5"
-            title={system.ml_enabled !== false ? 'AI/ML Model Active: Inbound flows analyzed for zero-day anomalies' : 'AI/ML Model Disabled: ML inference bypassed'}
-          >
-            <BrainCircuit className={`w-3.5 h-3.5 ${system.ml_enabled !== false ? 'text-purple-400' : 'text-muted-foreground'}`} />
-            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-              system.ml_enabled !== false
-                ? 'bg-purple-500/20 text-purple-400 border-purple-500/30'
-                : 'bg-muted/40 text-muted-foreground border-border/30'
-            }`}>
-              ML: {system.ml_enabled !== false ? 'Active' : 'Bypassed'}
-            </span>
-          </div>
+          <span className="text-border">|</span>
+          <span>{system.gateway_ip || 'Local Host'}</span>
+          <span className="text-border">|</span>
+          <span>Up {formatUptime(telemetry.uptime_seconds)}</span>
+          <span className="text-border">|</span>
+          <span className={`text-[10px] px-1.5 py-0.2 rounded font-sans font-medium ${system.ml_enabled !== false ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>
+            ML: {system.ml_enabled !== false ? 'Active' : 'Off'}
+          </span>
         </div>
       </div>
 
-      {/* Packet & Flow Telemetry Banner */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        <div className="kinetic-card rounded-xl p-3 text-left">
-          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Captured</span>
-          <span className="text-xl font-bold font-mono text-primary text-glow">
-            {(metrics.packets_captured || network.packet_count || 0).toLocaleString()}
-          </span>
-          <span className="text-[10px] text-muted-foreground block">Zero-copy packets</span>
-        </div>
-        <div className="kinetic-card rounded-xl p-3 text-left">
-          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Inspected</span>
-          <span className="text-xl font-bold font-mono text-emerald-400">
-            {(metrics.packets_inspected || network.packet_count || 0).toLocaleString()}
-          </span>
-          <span className="text-[10px] text-muted-foreground block">Deep decoded pkts</span>
-        </div>
-        <div className="kinetic-card rounded-xl p-3 text-left">
-          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Active Flows</span>
-          <span className="text-xl font-bold font-mono text-sky-400">
-            {(metrics.active_flows || system.active_connections || 0).toLocaleString()}
-          </span>
-          <span className="text-[10px] text-muted-foreground block">4-tuple tracked</span>
-        </div>
-        <div className="kinetic-card rounded-xl p-3 text-left">
-          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Block Confirmed</span>
-          <span className="text-xl font-bold font-mono text-emerald-400">
-            {(metrics.blocks_confirmed || network.blocked_ips_count || 0).toLocaleString()}
-          </span>
-          <span className="text-[10px] text-emerald-500/70 block">Firewall verified</span>
-        </div>
-        <div className="kinetic-card rounded-xl p-3 text-left">
-          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Block Requested</span>
-          <span className="text-xl font-bold font-mono text-amber-400">
-            {(metrics.blocks_requested || 0).toLocaleString()}
-          </span>
-          <span className="text-[10px] text-amber-500/70 block">Dispatched</span>
-        </div>
-        <div className="kinetic-card rounded-xl p-3 text-left">
-          <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider block">Packets Dropped</span>
-          <span className={`text-xl font-bold font-mono ${(metrics.packets_dropped || 0) > 0 ? 'text-rose-400' : 'text-muted-foreground'}`}>
-            {(metrics.packets_dropped || 0).toLocaleString()}
-          </span>
-          <span className="text-[10px] text-muted-foreground block">Ring buffer drops</span>
-        </div>
-      </div>
-
-      {/* Primary KPI Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KpiCard
-          title="Monitored Endpoints"
-          value={devices.length.toString()}
-          icon={<Network className="text-emerald-500" />}
-          trend="Click to inspect inventory"
+          title="Monitored Hosts"
+          value={safeLocaleString(devices.length)}
+          subtitle="Click to view discovered devices"
           onClick={openDevices}
         />
         <KpiCard
           title="Active Alerts"
-          value={network.alerts_count.toString()}
-          icon={<AlertOctagon className="text-amber-500" />}
-          trend={alerts.length > 0 ? "Threats detected" : "All clear"}
-          alert={alerts.length > 0}
+          value={safeLocaleString(network.alerts_count ?? alerts.length)}
+          subtitle={alerts.length > 0 ? 'Threat detections' : 'No threats detected'}
         />
         <KpiCard
-          title="Active IP Blocks"
-          value={network.blocked_ips_count.toString()}
-          icon={<ShieldAlert className="text-red-500" />}
-          trend="Enforced in OS firewall"
+          title="Enforced Blocks"
+          value={safeLocaleString(network.blocked_ips_count ?? blocked.length)}
+          subtitle="Active kernel firewall rules"
         />
-        <div className="kinetic-card rounded-2xl p-4 flex flex-col h-[130px] overflow-hidden relative">
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-medium text-muted-foreground flex items-center gap-1">
-              <Activity className="w-4 h-4 text-blue-500" />
-              Live Traffic Stream
-            </h3>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-primary font-mono">{network.packet_count.toLocaleString()} pkts</span>
-              <button
-                onClick={openLiveTraffic}
-                className="p-1 hover:bg-white/10 rounded-md transition-colors text-muted-foreground hover:text-foreground"
-                title="Full Screen Live Traffic"
-              >
-                <Maximize className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
-            {traffic_log && traffic_log.length > 0 ? (
-              [...traffic_log].slice(0, 10).map((log: any, i: number) => (
-                <div key={i} className="flex justify-between items-center text-xs">
-                  <span className="text-muted-foreground font-mono truncate max-w-[80px]" title={log.src_ip}>{log.src_ip}</span>
-                  <span className="truncate flex-1 mx-2 text-right text-foreground font-mono" title={log.domain}>{log.domain}</span>
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${log.proto === 'HTTPS' ? 'bg-green-500/10 text-green-500' : log.proto === 'HTTP' ? 'bg-orange-500/10 text-orange-500' : 'bg-blue-500/10 text-blue-500'}`}>{log.proto}</span>
-                </div>
-              ))
-            ) : (
-              <div className="h-full flex items-center justify-center text-muted-foreground text-xs italic">Awaiting traffic...</div>
-            )}
-          </div>
-          <div className="absolute bottom-0 left-0 right-0 h-4 bg-gradient-to-t from-[var(--color-background)] to-transparent pointer-events-none" />
+        <KpiCard
+          title="Current Throughput"
+          value={`${safeLocaleString(livePacketRate)}/s`}
+          subtitle="Inspected packets per second"
+        />
+      </div>
+
+      {/* Metric Counters Strip */}
+      <div className="card p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 text-xs">
+        <div>
+          <span className="text-muted-foreground block text-[11px]">Total Packets</span>
+          <span className="text-base font-semibold font-mono text-foreground">
+            {safeLocaleString(metrics.packets_captured ?? network.packet_count ?? 0)}
+          </span>
+        </div>
+        <div>
+          <span className="text-muted-foreground block text-[11px]">Deep Inspected</span>
+          <span className="text-base font-semibold font-mono text-foreground">
+            {safeLocaleString(metrics.packets_inspected ?? network.packet_count ?? 0)}
+          </span>
+        </div>
+        <div>
+          <span className="text-muted-foreground block text-[11px]">Active Flows</span>
+          <span className="text-base font-semibold font-mono text-foreground">
+            {safeLocaleString(metrics.active_flows ?? system.active_connections ?? 0)}
+          </span>
+        </div>
+        <div>
+          <span className="text-muted-foreground block text-[11px]">Confirmed Blocks</span>
+          <span className="text-base font-semibold font-mono text-success">
+            {safeLocaleString(metrics.blocks_confirmed ?? network.blocked_ips_count ?? 0)}
+          </span>
+        </div>
+        <div>
+          <span className="text-muted-foreground block text-[11px]">Requested Blocks</span>
+          <span className="text-base font-semibold font-mono text-warning">
+            {safeLocaleString(metrics.blocks_requested ?? 0)}
+          </span>
+        </div>
+        <div>
+          <span className="text-muted-foreground block text-[11px]">Packets Dropped</span>
+          <span className="text-base font-semibold font-mono text-muted-foreground">
+            {safeLocaleString(metrics.packets_dropped ?? 0)}
+          </span>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Main Chart */}
-        <div className="lg:col-span-2 kinetic-card rounded-2xl p-6 relative">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold flex items-center gap-2">
-              <Activity className="w-5 h-5 text-primary" /> Traffic Analysis
-            </h3>
-            <button
-              onClick={openTraffic}
-              className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-muted-foreground hover:text-foreground"
-              title="Full Screen Analysis"
-            >
-              <Maximize className="w-4 h-4" />
-            </button>
+      {/* Traffic Rate Chart */}
+      <div className="card p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold">Inspection Throughput</h2>
+            <p className="text-xs text-muted-foreground">Rolling packet ingestion rate over time.</p>
           </div>
-          <div className="h-[300px] w-full">
-            <TrafficChart data={packetHistory} />
-          </div>
+          <Link
+            to="/live-traffic"
+            className="text-xs text-primary hover:underline inline-flex items-center gap-1 font-medium"
+          >
+            Live monitor <ExternalLink className="w-3 h-3" />
+          </Link>
         </div>
+        <div className="h-44 w-full pt-2">
+          <TrafficChart data={packetHistory} />
+        </div>
+      </div>
 
-        {/* All Source IPs */}
-        <div className="kinetic-card rounded-2xl p-6 flex flex-col">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold flex items-center gap-2">
-              <ArrowUpRight className="w-5 h-5 text-rose-500" /> All Source IPs
-            </h3>
+      {/* Middle Grid: Top Sources & Protocol Chart */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Active Source IPs */}
+        <div className="card p-4 flex flex-col lg:col-span-2">
+          <div className="flex items-center justify-between pb-3 border-b border-border">
+            <h2 className="text-sm font-semibold">Active Endpoints ({mergedIPs.length})</h2>
+            <span className="text-xs text-muted-foreground">Sorted by packet volume</span>
           </div>
-          <div className="flex-1 overflow-y-auto pr-2 space-y-3 max-h-[300px] custom-scrollbar">
-            {mergedIPs.map((ip: any, i: number) => (
-              <div key={ip.ip || i} className="flex items-center gap-4 p-3 rounded-xl kinetic-card">
-                <div className="px-3 py-1.5 rounded-lg bg-primary/10 flex items-center justify-center text-xs font-bold text-primary min-w-[80px]">
-                  {ip.count.toLocaleString()} pkts
+          <div className="divide-y divide-border/60 max-h-64 overflow-y-auto mt-2">
+            {mergedIPs.slice(0, 15).map((ip: any) => (
+              <div key={ip.ip} className="py-2 flex items-center justify-between text-xs">
+                <div className="space-y-0.5">
+                  <span className="font-mono font-medium text-foreground">{ip.ip}</span>
+                  <div className="text-[11px] text-muted-foreground font-mono">
+                    {ip.mac !== 'Unknown' ? `MAC: ${ip.mac}` : ip.status}
+                  </div>
                 </div>
-                <div className="flex flex-col flex-1">
-                  <span className="font-mono text-sm font-medium">{ip.ip}</span>
-                  <span className="text-xs text-muted-foreground font-mono">{ip.mac !== 'Unknown' ? `MAC: ${ip.mac}` : ip.status}</span>
-                </div>
+                <span className="font-mono text-xs text-muted-foreground">
+                  {safeLocaleString(ip.count)} pkts
+                </span>
               </div>
             ))}
             {mergedIPs.length === 0 && (
-              <div className="text-center text-muted-foreground py-8 text-sm">No traffic or devices detected yet</div>
+              <div className="py-8 text-center text-xs text-muted-foreground">
+                No active traffic detected yet.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Protocol Distribution */}
+        <div className="card p-4 flex flex-col">
+          <div className="pb-3 border-b border-border">
+            <h2 className="text-sm font-semibold">Protocols</h2>
+          </div>
+          <div className="h-64 w-full pt-2">
+            <ProtocolChart protocolCounts={network.protocol_counts || {}} />
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom Grid: Recent Detections & Blocked IPs */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Recent Detections */}
+        <div className="card p-4 lg:col-span-2 flex flex-col">
+          <div className="flex items-center justify-between pb-3 border-b border-border">
+            <h2 className="text-sm font-semibold">Recent Alerts ({reversedAlerts.length})</h2>
+            <Link to="/alerts" className="text-xs text-primary hover:underline">
+              View all
+            </Link>
+          </div>
+          <div className="divide-y divide-border/60 max-h-72 overflow-y-auto mt-1">
+            {reversedAlerts.slice(0, 8).map((alert: any) => {
+              const sev = (alert.severity || 'Medium').toUpperCase();
+              let dotColor = 'bg-blue-500';
+              if (sev === 'CRITICAL') dotColor = 'bg-destructive';
+              if (sev === 'HIGH') dotColor = 'bg-warning';
+
+              return (
+                <div key={alert.id || `${alert.source_ip}-${alert.timestamp}`} className="py-2.5 flex items-start justify-between gap-3 text-xs">
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    <span className={`w-2 h-2 rounded-full mt-1 shrink-0 ${dotColor}`} />
+                    <div className="space-y-0.5 truncate">
+                      <div className="font-medium text-foreground truncate">{alert.type || 'Alert'}</div>
+                      <div className="font-mono text-[11px] text-muted-foreground truncate">
+                        {alert.source_ip || '0.0.0.0'} → {alert.dest_ip || 'Local'}
+                      </div>
+                    </div>
+                  </div>
+                  <span className="font-mono text-[11px] text-muted-foreground shrink-0">
+                    {safeFormatTime(alert.timestamp)}
+                  </span>
+                </div>
+              );
+            })}
+            {reversedAlerts.length === 0 && (
+              <div className="py-12 text-center text-xs text-muted-foreground flex flex-col items-center gap-1">
+                <CheckCircle2 className="w-5 h-5 text-success mb-1" />
+                <span>No active threats detected.</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Blocked IP Quick List */}
+        <div className="card p-4 flex flex-col">
+          <div className="flex items-center justify-between pb-3 border-b border-border">
+            <h2 className="text-sm font-semibold">Firewall Blocks ({blockedIPs.length})</h2>
+            <Link to="/blocked" className="text-xs text-primary hover:underline">
+              Manage
+            </Link>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-1.5 overflow-y-auto max-h-64">
+            {blockedIPs.map((ip: string) => (
+              <span
+                key={ip}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-secondary text-foreground font-mono text-xs border border-border"
+              >
+                {ip}
+                <button
+                  onClick={() =>
+                    fetch(`${API_BASE}/api/unblock/${ip}`, {
+                      method: 'POST',
+                      headers: { 'X-API-Key': API_KEY },
+                    })
+                  }
+                  className="text-muted-foreground hover:text-foreground ml-0.5"
+                  title="Unblock"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            ))}
+            {blockedIPs.length === 0 && (
+              <div className="py-8 text-center text-xs text-muted-foreground w-full">
+                No addresses currently blocked.
+              </div>
             )}
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Recent Alerts — REMOVED framer-motion AnimatePresence that was re-animating every WS tick */}
-        <div className="kinetic-card rounded-2xl p-6">
-          <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-            <AlertOctagon className="w-5 h-5 text-amber-500" /> Recent Detections
-          </h3>
-          <div className="space-y-3 h-[400px] overflow-y-auto pr-2">
-            {reversedAlerts.map((alert: any) => (
-              <div
-                key={alert.id}
-                className="p-4 rounded-xl kinetic-card flex gap-4 bg-background"
+      {/* Discovered Devices Modal */}
+      {showDevicesModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs"
+          onClick={closeDevices}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="card w-full max-w-xl p-5 shadow-lg border border-border space-y-4"
+          >
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <Monitor className="w-4 h-4 text-primary" />
+                <h3 className="text-sm font-semibold">Discovered Devices ({devices.length})</h3>
+              </div>
+              <button
+                onClick={closeDevices}
+                className="text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted"
               >
-                <div className={`mt-1 flex-shrink-0 ${alert.severity === 'Critical' ? 'text-red-500' :
-                  alert.severity === 'High' ? 'text-orange-500' :
-                    alert.severity === 'Medium' ? 'text-amber-500' :
-                      'text-blue-500'
-                }`}>
-                  <ShieldAlert className="w-5 h-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between mb-1 gap-2 flex-wrap">
-                    <div className="flex items-center gap-2">
-                      <h4 className="font-semibold text-sm truncate">{alert.type}</h4>
-                      {alert.action === 'BLOCK_CONFIRMED' && (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                          CONFIRMED BLOCK
-                        </span>
-                      )}
-                      {alert.action === 'BLOCK_REQUESTED' && (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">
-                          BLOCK REQUESTED
-                        </span>
-                      )}
-                      {alert.action === 'BLOCK_FAILED' && (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/30">
-                          BLOCK FAILED
-                        </span>
-                      )}
-                      {(!alert.action || alert.action === 'DETECTED') && (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/10 text-blue-400 border border-blue-500/30">
-                          DETECTED
-                        </span>
-                      )}
-                      {alert.platform && (
-                        <span className="px-1.5 py-0.5 rounded text-[9px] font-mono uppercase bg-white/5 text-muted-foreground border border-border/20">
-                          {alert.platform}
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {alert.confidence > 0 && (
-                        <span className="text-[10px] font-mono text-emerald-400 font-semibold">
-                          {(alert.confidence * 100).toFixed(0)}% Conf
-                        </span>
-                      )}
-                      <span className="text-xs text-muted-foreground">{format(new Date(alert.timestamp * 1000), 'HH:mm:ss')}</span>
-                    </div>
-                  </div>
-                  <p className="text-sm text-muted-foreground mb-1">{alert.reason}</p>
-                  {alert.evidence && (
-                    <p className="text-xs font-mono text-muted-foreground/80 bg-black/20 px-2 py-1 rounded mb-2 border border-white/5 truncate" title={alert.evidence}>
-                      Evidence: {alert.evidence}
-                    </p>
-                  )}
-                  <div className="flex gap-2 text-xs font-mono kinetic-card p-2 rounded-lg inline-flex mt-1">
-                    <span className="text-muted-foreground">SRC:</span>
-                    <span className={blockedIPs.includes(alert.source_ip) ? 'text-red-400 line-through' : ''}>{alert.source_ip}</span>
-                    <span className="text-muted-foreground ml-2">DST:</span> {alert.dest_ip}
-                  </div>
-                </div>
-              </div>
-            ))}
-            {alerts.length === 0 && (
-              <div className="h-full flex flex-col items-center justify-center text-muted-foreground">
-                <ShieldAlert className="w-12 h-12 mb-4 opacity-20" />
-                <p>No threats detected</p>
-              </div>
-            )}
-          </div>
-        </div>
+                <X className="w-4 h-4" />
+              </button>
+            </div>
 
-        {/* Threat Timeline & Blocked IPs */}
-        <div className="space-y-6 flex flex-col">
-          <div className="kinetic-card rounded-2xl p-6 flex-1">
-            <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-              <Ban className="w-5 h-5 text-red-500" /> Blocked IPs
-            </h3>
-            <div className="flex flex-wrap gap-2">
-              {blockedIPs.map((ip: string) => (
-                <div key={ip} className="px-3 py-1.5 kinetic-card text-red-500 rounded-lg font-mono text-sm flex items-center gap-2">
-                  {ip}
-                  <button onClick={() => fetch(`${API_BASE}/api/unblock/${ip}`, {
-                    method: 'POST',
-                    headers: { 'X-API-Key': API_KEY }
-                  })} className="hover:text-red-400 transition-colors">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
-                  </button>
+            <div className="max-h-80 overflow-y-auto divide-y divide-border/60">
+              {devices.map((device: any, i: number) => (
+                <div key={i} className="py-2.5 flex items-center justify-between text-xs">
+                  <div className="space-y-0.5">
+                    <span className="font-semibold text-foreground">{device.name || 'Unknown Host'}</span>
+                    <div className="font-mono text-muted-foreground text-[11px]">
+                      {device.ip} • MAC: {device.mac || 'N/A'}
+                    </div>
+                  </div>
+                  <span className="text-[11px] text-muted-foreground font-mono">
+                    {safeFormatTime(device.last_seen)}
+                  </span>
                 </div>
               ))}
-              {blocked.length === 0 && (
-                <div className="text-muted-foreground text-sm w-full text-center py-4">No IPs currently blocked</div>
+              {devices.length === 0 && (
+                <div className="py-8 text-center text-xs text-muted-foreground">
+                  No active devices recorded on network.
+                </div>
               )}
-            </div>
-          </div>
-
-          <div className="kinetic-card rounded-2xl p-6 flex-1">
-            <h3 className="text-lg font-semibold mb-4">Protocol Distribution</h3>
-            <div className="h-[200px]">
-              <ProtocolChart protocolCounts={network.protocol_counts || {}} />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Active Devices Modal */}
-      {showDevicesModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={closeDevices}>
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="kinetic-card rounded-2xl w-full max-w-2xl overflow-hidden shadow-2xl border border-white/10 animate-in fade-in zoom-in-95 duration-200"
-          >
-            <div className="flex items-center justify-between p-4 border-b border-border bg-black/20">
-              <h3 className="text-lg font-semibold flex items-center gap-2">
-                <Monitor className="w-5 h-5 text-emerald-500" /> Active Devices on Network
-              </h3>
-              <button onClick={closeDevices} className="p-1 hover:bg-white/10 rounded-lg transition-colors">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="p-4 max-h-[60vh] overflow-y-auto">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {devices.map((device: any, i: number) => (
-                  <div key={i} className="kinetic-card p-4 rounded-xl flex flex-col gap-2 bg-black/10">
-                    <div className="flex justify-between items-center">
-                      <span className="font-semibold text-primary">{device.name || 'Unknown Device'}</span>
-                      <span className="text-xs bg-emerald-500/10 text-emerald-500 px-2 py-1 rounded-full">Active</span>
-                    </div>
-                    <div className="flex flex-col text-sm font-mono text-muted-foreground mt-2 space-y-1">
-                      <div className="flex justify-between"><span>IP:</span> <span className="text-foreground">{device.ip}</span></div>
-                      <div className="flex justify-between"><span>MAC:</span> <span className="text-foreground">{device.mac}</span></div>
-                      <div className="flex justify-between text-xs mt-2 text-muted-foreground/50">
-                        <span>Seen:</span> <span>{format(new Date(device.last_seen * 1000), 'HH:mm:ss')}</span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                {devices.length === 0 && (
-                  <div className="col-span-full text-center py-8 text-muted-foreground">No active devices detected</div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Traffic Analysis Full Screen Modal */}
-      {showTrafficModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md" onClick={closeTraffic}>
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="kinetic-card rounded-2xl w-full h-[90vh] max-w-[95vw] overflow-hidden shadow-2xl border border-white/10 flex flex-col animate-in fade-in zoom-in-95 duration-200"
-          >
-            <div className="flex items-center justify-between p-4 border-b border-border bg-black/20 shrink-0">
-              <h3 className="text-xl font-semibold flex items-center gap-2">
-                <Activity className="w-6 h-6 text-primary" /> Full Screen Traffic Analysis
-              </h3>
-              <button onClick={closeTraffic} className="p-2 hover:bg-white/10 rounded-lg transition-colors bg-white/5">
-                <X className="w-6 h-6" />
-              </button>
-            </div>
-            <div className="flex-1 p-6 overflow-hidden flex flex-col lg:flex-row gap-6">
-              <div className="flex-1 flex flex-col">
-                <h4 className="text-sm font-medium text-muted-foreground mb-4">Live Packet Rate</h4>
-                <div className="flex-1 min-h-[300px]">
-                  <TrafficChart data={packetHistory} gradientId="colorPacketsModal" strokeWidth={4} />
-                </div>
-              </div>
-              <div className="w-full lg:w-[400px] flex flex-col kinetic-card rounded-xl bg-black/20 p-4">
-                <h4 className="text-sm font-medium text-muted-foreground mb-4 flex items-center gap-2">
-                  <ArrowUpRight className="w-4 h-4 text-rose-500" /> Active Clients
-                </h4>
-                <div className="flex-1 overflow-y-auto pr-2 space-y-2 custom-scrollbar">
-                  {mergedIPs.map((ip: any, i: number) => (
-                    <div key={ip.ip || i} className="flex items-center gap-3 p-3 rounded-lg bg-black/40 border border-white/5 hover:border-primary/30 transition-colors">
-                      <div className="px-2 py-1 rounded bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary min-w-[60px]">
-                        {ip.count.toLocaleString()} pkt
-                      </div>
-                      <div className="flex flex-col flex-1 min-w-0">
-                        <span className="font-mono text-sm font-medium truncate">{ip.ip}</span>
-                        <span className="text-[10px] text-muted-foreground font-mono truncate">{ip.mac !== 'Unknown' ? `MAC: ${ip.mac}` : ip.status}</span>
-                      </div>
-                    </div>
-                  ))}
-                  {mergedIPs.length === 0 && (
-                    <div className="text-center text-muted-foreground py-8 text-sm">No active clients detected</div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Live Traffic Full Screen Modal */}
-      {showLiveTrafficModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md" onClick={closeLiveTraffic}>
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="kinetic-card rounded-2xl w-full h-[90vh] max-w-6xl overflow-hidden shadow-2xl border border-white/10 flex flex-col animate-in fade-in zoom-in-95 duration-200"
-          >
-            <div className="flex items-center justify-between p-4 border-b border-border bg-black/20 shrink-0">
-              <h3 className="text-xl font-semibold flex items-center gap-2">
-                <Activity className="w-6 h-6 text-blue-500" /> Live Traffic Monitor
-              </h3>
-              <div className="flex items-center gap-3">
-                {filterIP && (
-                  <div className="flex items-center gap-2 bg-primary/10 border border-primary/30 text-primary px-3 py-1.5 rounded-lg text-sm font-mono">
-                    <Filter className="w-3.5 h-3.5" />
-                    Monitoring: {filterIP}
-                    <button onClick={() => setFilterIP('')} className="hover:text-red-400 transition-colors ml-1">
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                )}
-                <button onClick={closeLiveTraffic} className="p-2 hover:bg-white/10 rounded-lg transition-colors bg-white/5">
-                  <X className="w-6 h-6" />
-                </button>
-              </div>
-            </div>
-            <div className="flex-1 flex overflow-hidden">
-              {/* IP Selector Sidebar */}
-              <div className="w-64 border-r border-white/5 bg-black/20 flex flex-col shrink-0">
-                <div className="p-3 border-b border-white/5">
-                  <div className="relative">
-                    <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                    <input
-                      type="text"
-                      value={filterIP}
-                      onChange={(e) => setFilterIP(e.target.value)}
-                      placeholder="Filter by IP..."
-                      className="w-full bg-black/30 border border-white/10 rounded-lg pl-9 pr-3 py-2 text-sm font-mono text-foreground outline-none focus:border-primary/50 transition-colors placeholder:text-muted-foreground/50"
-                    />
-                  </div>
-                </div>
-                <div className="p-2 flex-1 overflow-y-auto custom-scrollbar space-y-1">
-                  <button
-                    onClick={() => setFilterIP('')}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-all flex items-center gap-2 ${
-                      !filterIP ? 'bg-primary/15 text-primary border border-primary/30' : 'hover:bg-white/5 text-muted-foreground'
-                    }`}
-                  >
-                    <Network className="w-3.5 h-3.5" />
-                    All Traffic
-                  </button>
-                  {mergedIPs.map((ip: any, i: number) => (
-                    <button
-                      key={ip.ip || i}
-                      onClick={() => setFilterIP(ip.ip)}
-                      className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-all font-mono flex items-center justify-between ${
-                        filterIP === ip.ip ? 'bg-primary/15 text-primary border border-primary/30' : 'hover:bg-white/5 text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      <span className="truncate">{ip.ip}</span>
-                      <span className="text-[10px] bg-white/5 px-1.5 py-0.5 rounded ml-2 shrink-0">{ip.count}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Traffic Log */}
-              <div className="flex-1 p-6 overflow-hidden flex flex-col bg-black/10">
-                <div className="flex items-center justify-between text-sm font-medium text-muted-foreground border-b border-white/5 pb-2 mb-4 px-2">
-                  <div className="w-[15%]">Time</div>
-                  <div className="w-[20%]">Source IP</div>
-                  <div className="w-[45%]">Domain / Destination</div>
-                  <div className="w-[20%] text-right">Protocol</div>
-                </div>
-                <div className="flex-1 overflow-y-auto pr-2 space-y-1.5 custom-scrollbar">
-                  {traffic_log && traffic_log.length > 0 ? (
-                    (() => {
-                      const filtered = [...traffic_log].filter((log: any) =>
-                        !filterIP || log.src_ip === filterIP || log.src_ip?.includes(filterIP)
-                      );
-                      return filtered.length > 0 ? filtered.map((log: any, i: number) => (
-                        <div key={i} className={`flex items-center text-sm p-3 rounded-lg border transition-colors ${
-                          filterIP && log.src_ip === filterIP
-                            ? 'bg-primary/5 border-primary/20 hover:bg-primary/10'
-                            : 'bg-black/20 hover:bg-black/40 border-transparent hover:border-white/5'
-                        }`}>
-                          <span className="w-[15%] text-muted-foreground font-mono text-xs truncate pr-2">
-                            {log.timestamp ? format(new Date(log.timestamp * 1000), 'HH:mm:ss') : '--'}
-                          </span>
-                          <span
-                            className="w-[20%] font-mono truncate pr-4 cursor-pointer hover:text-primary transition-colors"
-                            title={`Click to filter: ${log.src_ip}`}
-                            onClick={() => setFilterIP(log.src_ip)}
-                          >
-                            {log.src_ip}
-                          </span>
-                          <span className="w-[45%] text-foreground font-mono truncate pr-4" title={log.domain}>{log.domain}</span>
-                          <div className="w-[20%] flex justify-end">
-                            <span className={`px-2 py-1 rounded-md text-xs font-bold ${log.proto === 'HTTPS' ? 'bg-green-500/10 text-green-500' : log.proto === 'HTTP' ? 'bg-orange-500/10 text-orange-500' : 'bg-blue-500/10 text-blue-500'}`}>
-                              {log.proto}
-                            </span>
-                          </div>
-                        </div>
-                      )) : (
-                        <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-2">
-                          <Filter className="w-8 h-8 opacity-30" />
-                          <span className="italic">No traffic from {filterIP}</span>
-                          <button onClick={() => setFilterIP('')} className="text-primary text-sm hover:underline">Clear filter</button>
-                        </div>
-                      );
-                    })()
-                  ) : (
-                    <div className="h-full flex items-center justify-center text-muted-foreground italic">Awaiting traffic...</div>
-                  )}
-                </div>
-              </div>
             </div>
           </div>
         </div>
@@ -733,4 +545,3 @@ export default function Dashboard({ data, status }: { data: any; status: string 
     </div>
   );
 }
-

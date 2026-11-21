@@ -1,49 +1,77 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+export interface UseWebSocketReturn {
+  data: any;
+  status: 'connected' | 'connecting' | 'reconnecting' | 'disconnected' | 'error';
+  reconnect: () => void;
+  lastUpdated: number;
+}
+
 /**
- * Performance-optimized WebSocket hook.
- *
- * Key changes vs the original:
- * - Throttles state updates to at most once per `throttleMs` (default 2000ms).
- *   The Go backend pushes every 1s, but the React tree doesn't need to re-render
- *   that often — 2s is plenty for a monitoring dashboard.
- * - Uses a ref to hold the latest parsed message so the throttle window
- *   always publishes the *freshest* data, not stale data.
- * - Stable `status` ref avoids unnecessary re-renders from connection state flapping.
+ * Resilient, performance-optimized WebSocket hook.
+ * Handles auto-reconnection, protocol safety, and throttled state updates.
  */
 export const useWebSocket = (
   url: string,
   protocols?: string | string[],
-  throttleMs = 2000
-) => {
+  throttleMs = 1000
+): UseWebSocketReturn => {
   const [data, setData] = useState<any>(null);
-  const [status, setStatus] = useState<string>('connecting');
+  const [status, setStatus] = useState<UseWebSocketReturn['status']>('connecting');
+  const [lastUpdated, setLastUpdated] = useState<number>(0);
+
   const isCleaningUp = useRef(false);
   const latestData = useRef<any>(null);
   const throttleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastFlush = useRef(0);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectCount = useRef(0);
 
   const flush = useCallback(() => {
     if (latestData.current !== null) {
       setData(latestData.current);
-      lastFlush.current = Date.now();
+      const now = Date.now();
+      lastFlush.current = now;
+      setLastUpdated(now);
     }
     throttleTimer.current = null;
   }, []);
 
-  useEffect(() => {
-    isCleaningUp.current = false;
-    let ws: WebSocket;
-    let reconnectTimer: ReturnType<typeof setTimeout>;
+  const connect = useCallback(() => {
+    if (isCleaningUp.current) return;
 
-    const connect = () => {
-      ws = new WebSocket(url, protocols);
+    const previousSocket = wsRef.current;
+    wsRef.current = null;
+    if (previousSocket) {
+      try {
+        previousSocket.close();
+      } catch (_) {}
+    }
+
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+
+    setStatus(reconnectCount.current > 0 ? 'reconnecting' : 'connecting');
+
+    try {
+      // Protocol safe creation
+      const ws = protocols && (Array.isArray(protocols) ? protocols.length > 0 : Boolean(protocols))
+        ? new WebSocket(url, protocols)
+        : new WebSocket(url);
+
+      wsRef.current = ws;
 
       ws.onopen = () => {
+        if (isCleaningUp.current || wsRef.current !== ws) return;
+        reconnectCount.current = 0;
         setStatus('connected');
       };
 
       ws.onmessage = (event) => {
+        if (isCleaningUp.current || wsRef.current !== ws) return;
         try {
           const parsed = JSON.parse(event.data);
           latestData.current = parsed;
@@ -52,25 +80,27 @@ export const useWebSocket = (
           const elapsed = now - lastFlush.current;
 
           if (elapsed >= throttleMs) {
-            // Enough time has passed — flush immediately
             flush();
           } else if (!throttleTimer.current) {
-            // Schedule a flush for the remainder of the throttle window
             throttleTimer.current = setTimeout(flush, throttleMs - elapsed);
           }
-          // Otherwise a timer is already pending — it will pick up latestData
         } catch (e) {
           console.error("Failed to parse websocket message", e);
         }
       };
 
       ws.onclose = () => {
+        if (isCleaningUp.current || wsRef.current !== ws) return;
+        wsRef.current = null;
         setStatus('disconnected');
-        if (isCleaningUp.current) return;
-        reconnectTimer = setTimeout(connect, 3000);
+        reconnectCount.current += 1;
+        // Exponential backoff capped at 5 seconds
+        const delay = Math.min(1000 * Math.pow(1.5, reconnectCount.current), 5000);
+        reconnectTimer.current = setTimeout(connect, delay);
       };
 
       ws.onerror = () => {
+        if (isCleaningUp.current || wsRef.current !== ws) return;
         setStatus('error');
         try {
           if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
@@ -78,17 +108,40 @@ export const useWebSocket = (
           }
         } catch (_) {}
       };
-    };
+    } catch (err) {
+      console.warn("WebSocket connection attempt failed:", err);
+      setStatus('error');
+      reconnectCount.current += 1;
+      reconnectTimer.current = setTimeout(connect, 3000);
+    }
+  }, [url, protocols, throttleMs, flush]);
 
+  useEffect(() => {
+    isCleaningUp.current = false;
     connect();
 
     return () => {
       isCleaningUp.current = true;
-      if (ws) ws.close();
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (throttleTimer.current) clearTimeout(throttleTimer.current);
+      const socket = wsRef.current;
+      wsRef.current = null;
+      if (socket) {
+        try { socket.close(); } catch (_) {}
+      }
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = null;
+      }
+      if (throttleTimer.current) {
+        clearTimeout(throttleTimer.current);
+        throttleTimer.current = null;
+      }
     };
-  }, [url, throttleMs, flush]);
+  }, [connect]);
 
-  return { data, status };
+  const manualReconnect = useCallback(() => {
+    reconnectCount.current = 0;
+    connect();
+  }, [connect]);
+
+  return { data, status, reconnect: manualReconnect, lastUpdated };
 };

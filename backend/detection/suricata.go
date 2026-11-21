@@ -158,8 +158,18 @@ func StartSuricataSupervisor(cfg *config.Config) {
 	if iface == "" {
 		iface = cfg.Interface
 	}
+	if iface == "" {
+		iface = cfg.CaptureInterface
+	}
 	if iface == "" && runtime.GOOS == "linux" {
-		iface = "eth0"
+		wan, lan := config.DiscoverInterfaces()
+		if lan != "" {
+			iface = lan
+		} else if wan != "" {
+			iface = wan
+		} else {
+			iface = "wlp1s0"
+		}
 	}
 
 	fmt.Printf("[Suricata Engine] Primary DPI Engine: %s on interface '%s'\n", bin, iface)

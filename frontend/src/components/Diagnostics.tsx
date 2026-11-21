@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Network, Server, Router as RouterIcon, ShieldCheck, AlertCircle } from 'lucide-react';
+import { Server, Router as RouterIcon, ShieldCheck, AlertCircle } from 'lucide-react';
 
 export default function DiagnosticsView() {
   const [data, setData] = useState<any>(null);
@@ -11,81 +11,117 @@ export default function DiagnosticsView() {
     const API_BASE = `http://${API_HOST}:8000`;
     const API_KEY = import.meta.env.VITE_API_KEY || '';
     fetch(`${API_BASE}/api/system/network-check`, { headers: { 'X-API-Key': API_KEY } })
-      .then(res => res.json())
-      .then(data => {
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`Diagnostics request failed with status ${res.status}`);
+        }
+        return res.json();
+      })
+      .then((data) => {
         setData(data);
         setLoading(false);
       })
-      .catch(err => {
+      .catch((err) => {
         console.error(err);
-        setError('Failed to load diagnostics.');
+        setError('Failed to load network diagnostics.');
         setLoading(false);
       });
   }, []);
 
-  if (loading) return <div className="text-muted-foreground animate-pulse">Loading diagnostics...</div>;
-  if (error) return <div className="text-red-500">{error}</div>;
+  if (loading) {
+    return <div className="text-xs text-muted-foreground">Running network diagnostics...</div>;
+  }
+  if (error) {
+    return <div className="text-xs text-destructive">{error}</div>;
+  }
   if (!data) return null;
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto">
-      <div className="flex items-center gap-3 mb-8">
-        <Network className="w-8 h-8 text-blue-500" />
-        <h2 className="text-3xl font-bold">Network Diagnostics</h2>
+    <div className="max-w-4xl mx-auto space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight">Network Diagnostics</h1>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          Interface bindings, packet forwarding configuration, and gateway routing readiness.
+        </p>
       </div>
-      
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="kinetic-card rounded-2xl p-6">
-          <div className="flex items-center gap-2 mb-4">
-            <Server className="w-6 h-6 text-primary" />
-            <h3 className="text-xl font-semibold">Deployment Configuration</h3>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {/* Deployment Config */}
+        <div className="card p-4 space-y-3">
+          <div className="flex items-center gap-2 border-b border-border pb-2.5">
+            <Server className="w-4 h-4 text-primary" />
+            <h2 className="text-sm font-semibold">Deployment Status</h2>
           </div>
-          <div className="space-y-3">
-            <div className="flex justify-between border-b border-border/20 pb-2">
-              <span className="text-muted-foreground">Deployment Mode</span>
-              <span className="font-mono text-primary font-bold">{data.deployment_mode}</span>
+          <div className="space-y-2 text-xs">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Mode</span>
+              <span className="font-mono font-medium text-foreground">{data.deployment_mode}</span>
             </div>
-            <div className="flex justify-between border-b border-border/20 pb-2">
+            <div className="flex justify-between">
               <span className="text-muted-foreground">Security Mode</span>
-              <span className="font-mono">{data.security_mode}</span>
+              <span className="font-mono font-medium text-foreground">{data.security_mode}</span>
             </div>
-            <div className="flex justify-between border-b border-border/20 pb-2">
-              <span className="text-muted-foreground">Firewall Mode</span>
-              <span className="font-mono">{data.firewall_mode}</span>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Firewall Filter</span>
+              <span className="font-mono font-medium text-foreground">{data.firewall_mode}</span>
             </div>
           </div>
         </div>
 
-        <div className="kinetic-card rounded-2xl p-6">
-          <div className="flex items-center gap-2 mb-4">
-            <RouterIcon className="w-6 h-6 text-emerald-500" />
-            <h3 className="text-xl font-semibold">Interfaces</h3>
+        {/* Interfaces */}
+        <div className="card p-4 space-y-3">
+          <div className="flex items-center gap-2 border-b border-border pb-2.5">
+            <RouterIcon className="w-4 h-4 text-primary" />
+            <h2 className="text-sm font-semibold">Interface State</h2>
           </div>
-          <div className="space-y-3">
-            <div className="flex justify-between border-b border-border/20 pb-2">
-              <span className="text-muted-foreground">WAN ({data.wan_interface})</span>
-              <span className="font-mono">{data.wan_address || 'Disconnected'}</span>
+          <div className="space-y-2 text-xs font-mono">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground font-sans">WAN ({data.wan_interface})</span>
+              <span className="text-foreground">{data.wan_address || 'Disconnected'}</span>
             </div>
-            <div className="flex justify-between border-b border-border/20 pb-2">
-              <span className="text-muted-foreground">LAN ({data.lan_interface})</span>
-              <span className="font-mono">{data.lan_address || 'Disconnected'}</span>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground font-sans">LAN ({data.lan_interface})</span>
+              <span className="text-foreground">{data.lan_address || 'Disconnected'}</span>
             </div>
-            <div className="flex justify-between border-b border-border/20 pb-2">
-              <span className="text-muted-foreground">IP Forwarding</span>
-              <span className={`font-mono ${data.ip_forwarding_enabled ? 'text-emerald-500' : 'text-red-500'}`}>
-                {data.ip_forwarding_enabled ? 'ENABLED' : 'DISABLED'}
+            <div className="flex justify-between">
+              <span className="text-muted-foreground font-sans">IP Forwarding</span>
+              <span
+                className={
+                  data.ip_forwarding_enabled === null
+                    ? 'text-muted-foreground'
+                    : data.ip_forwarding_enabled
+                    ? 'text-success font-semibold'
+                    : 'text-destructive font-semibold'
+                }
+              >
+                {data.ip_forwarding_enabled === null
+                  ? 'UNAVAILABLE'
+                  : data.ip_forwarding_enabled
+                  ? 'ENABLED'
+                  : 'DISABLED'}
               </span>
             </div>
           </div>
         </div>
       </div>
 
-      <div className={`kinetic-card rounded-2xl p-6 ${data.gateway_ready ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500'}`}>
-        <div className="flex items-center gap-2 mb-2">
-          {data.gateway_ready ? <ShieldCheck className="w-6 h-6 text-emerald-500" /> : <AlertCircle className="w-6 h-6 text-amber-500" />}
-          <h3 className="text-xl font-semibold">Gateway Readiness</h3>
+      {/* Gateway Status Banner */}
+      <div
+        className={`card p-4 flex items-start gap-3 border-l-4 ${
+          data.gateway_ready ? 'border-l-success' : 'border-l-warning'
+        }`}
+      >
+        {data.gateway_ready ? (
+          <ShieldCheck className="w-5 h-5 text-success shrink-0 mt-0.5" />
+        ) : (
+          <AlertCircle className="w-5 h-5 text-warning shrink-0 mt-0.5" />
+        )}
+        <div className="space-y-1">
+          <h3 className="text-sm font-semibold text-foreground">
+            {data.gateway_ready ? 'Gateway Ready' : 'Gateway Notice'}
+          </h3>
+          <p className="text-xs text-muted-foreground leading-relaxed">{data.gateway_reason}</p>
         </div>
-        <p className="text-muted-foreground">{data.gateway_reason}</p>
       </div>
     </div>
   );
